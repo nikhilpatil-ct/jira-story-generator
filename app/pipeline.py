@@ -1,7 +1,9 @@
+import asyncio
+
 from app.agents import drafter, extractor, validator
 from app.config import settings
 from app.models.schemas import ExtractionResult, GeneratedStory, IssueType
-from app.services import session_store, transcript_cleaner
+from app.services import pii_redactor, session_store, transcript_cleaner, translator
 
 
 async def generate_stories(
@@ -16,6 +18,18 @@ async def generate_stories(
     log("cleaning", f"Cleaning transcript ({len(conversation_text):,} characters)...")
     cleaned = transcript_cleaner.clean(conversation_text)
     log("cleaning", f"Cleaned transcript: {len(conversation_text):,} -> {len(cleaned):,} characters")
+
+    detected_lang = translator.detect_language(cleaned)
+    log("cleaning", f"Detected language: {detected_lang or 'unknown'} — normalizing to English...")
+    cleaned = await translator.translate_to_english(cleaned)
+    log("cleaning", "Transcript normalized to English")
+
+    log("cleaning", "Scanning for PII (names, emails, phone numbers, etc.)...")
+    cleaned, pii_entities = await asyncio.to_thread(pii_redactor.redact, cleaned)
+    if pii_entities:
+        log("cleaning", f"Redacted {len(pii_entities)} PII type(s): {', '.join(pii_entities)}")
+    else:
+        log("cleaning", "No PII detected")
 
     session_store.update_step(session_id, "extracting")
     log("extracting", "Extracting requirements, risks, and action items...")

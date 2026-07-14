@@ -7,6 +7,7 @@ load_dotenv()
 
 class Settings:
     anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
+    translation_model: str = os.getenv("TRANSLATION_MODEL", "claude-haiku-4-5-20251001")
 
     max_refinement_attempts: int = int(os.getenv("MAX_REFINEMENT_ATTEMPTS", "2"))
     validation_pass_score: int = int(os.getenv("VALIDATION_PASS_SCORE", "75"))
