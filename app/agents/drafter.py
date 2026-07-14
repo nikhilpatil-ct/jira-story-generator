@@ -1,54 +1,73 @@
 from app.agents.base import structured_call
-from app.models.schemas import ExtractedRequirement, JiraStory
+from app.models.schemas import ExtractedRequirement, IssueType, JiraBug, JiraEpic, JiraItem, JiraUserStory
 
-DRAFT_SYSTEM_PROMPT = """You are a senior agile business analyst who writes excellent JIRA stories.
+DRAFT_SYSTEM_PROMPTS = {
+    IssueType.EPIC: (
+        "You are a senior agile business analyst who writes excellent JIRA epics. Given a requirement "
+        "extracted from meeting notes (plus the original source text for grounding), write a complete "
+        "epic: business_value explains why this matters to the business, goal is the overall outcome, "
+        "success_criteria is 3-6 measurable statements that define when the epic is done. priority and "
+        "labels should be inferred from the language and context."
+    ),
+    IssueType.STORY: (
+        "You are a senior agile business analyst who writes excellent JIRA stories following INVEST "
+        "principles. Given a requirement extracted from meeting notes (plus the original source text for "
+        "grounding): user_story must follow 'As a <role>, I want <capability>, so that <benefit>' (infer a "
+        "sensible role from context if not stated explicitly); acceptance_criteria: 3-6 concrete, "
+        "testable, unambiguous statements a QA engineer could verify directly; story_points: estimate "
+        "using a Fibonacci-like scale (1, 2, 3, 5, 8, 13), null only if truly not estimable. priority and "
+        "labels should be inferred from the language and context."
+    ),
+    IssueType.BUG: (
+        "You are a senior QA/business analyst who writes excellent JIRA bug reports. Given a requirement "
+        "extracted from meeting notes (plus the original source text for grounding): steps_to_reproduce is "
+        "an ordered list of concrete steps; expected_result and actual_result describe the discrepancy; "
+        "severity reflects real-world impact; environment captures browser/OS/deployment context if "
+        "mentioned; root_cause is filled only if inferable from the source text, otherwise left null. "
+        "priority and labels should be inferred from the language and context."
+    ),
+}
 
-Given a requirement extracted from meeting notes (plus the original source text for grounding), write a \
-complete, high quality JIRA story following INVEST principles (Independent, Negotiable, Valuable, \
-Estimable, Small, Testable):
-- user_story must follow "As a <role>, I want <capability>, so that <benefit>". Infer a sensible role \
-from context if it is not stated explicitly.
-- acceptance_criteria: 3-6 concrete, testable, unambiguous statements a QA engineer could verify \
-directly -- avoid vague language like "should work well".
-- story_points: estimate using a Fibonacci-like scale (1, 2, 3, 5, 8, 13) based on apparent complexity; \
-use null only if there is truly not enough information to estimate.
-- priority and labels should be inferred from the language and context (urgency words, dependencies, \
-technical area).
-"""
+DRAFT_OUTPUT_FORMATS = {
+    IssueType.EPIC: JiraEpic,
+    IssueType.STORY: JiraUserStory,
+    IssueType.BUG: JiraBug,
+}
 
-REFINE_SYSTEM_PROMPT = """You are revising a previously drafted JIRA story based on specific feedback \
+REFINE_SYSTEM_PROMPT = """You are revising a previously drafted JIRA item based on specific feedback \
 (either from an automated quality reviewer or directly from the user). Preserve everything that is \
-already good about the story; change only what the feedback asks for. Keep the same overall shape and \
-level of detail as the original unless the feedback asks for more or less.
+already good; change only what the feedback asks for. Keep the same overall shape and level of detail as \
+the original unless the feedback asks for more or less.
 """
 
 
-async def draft(requirement: ExtractedRequirement, context: str) -> JiraStory:
+async def draft(requirement: ExtractedRequirement, context: str) -> JiraItem:
+    issue_type = requirement.issue_type if requirement.issue_type in DRAFT_OUTPUT_FORMATS else IssueType.STORY
     user_content = (
         f"Original source context:\n{context}\n\n"
-        f"Requirement to turn into a JIRA story:\n"
+        f"Requirement to turn into a JIRA {issue_type.value}:\n"
         f"Title: {requirement.title}\n"
         f"Details: {requirement.raw_description}\n"
-        f"Why this is a distinct story: {requirement.rationale}\n"
+        f"Why this is a distinct {issue_type.value}: {requirement.rationale}\n"
     )
     return await structured_call(
-        system=DRAFT_SYSTEM_PROMPT,
+        system=DRAFT_SYSTEM_PROMPTS[issue_type],
         messages=[{"role": "user", "content": user_content}],
-        output_format=JiraStory,
+        output_format=DRAFT_OUTPUT_FORMATS[issue_type],
         max_tokens=6000,
         thinking=True,
     )
 
 
-async def refine(story: JiraStory, feedback: str) -> JiraStory:
+async def refine(story: JiraItem, feedback: str) -> JiraItem:
     user_content = (
-        f"Current story:\n{story.model_dump_json(indent=2)}\n\n"
+        f"Current item (issue_type={story.issue_type.value}):\n{story.model_dump_json(indent=2)}\n\n"
         f"Feedback / requested change to address:\n{feedback}\n"
     )
     return await structured_call(
         system=REFINE_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
-        output_format=JiraStory,
+        output_format=type(story),
         max_tokens=6000,
         thinking=True,
     )

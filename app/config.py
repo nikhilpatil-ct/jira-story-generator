@@ -11,11 +11,11 @@ class Settings:
     max_refinement_attempts: int = int(os.getenv("MAX_REFINEMENT_ATTEMPTS", "2"))
     validation_pass_score: int = int(os.getenv("VALIDATION_PASS_SCORE", "75"))
 
-    jira_base_url: str | None = os.getenv("JIRA_BASE_URL") or None
-    jira_email: str | None = os.getenv("JIRA_EMAIL") or None
-    jira_api_token: str | None = os.getenv("JIRA_API_TOKEN") or None
-    jira_project_key: str | None = os.getenv("JIRA_PROJECT_KEY") or None
-    jira_story_points_field: str | None = os.getenv("JIRA_STORY_POINTS_FIELD") or None
+    jira_base_url: str | None = (os.getenv("JIRA_BASE_URL") or "").strip() or None
+    jira_email: str | None = (os.getenv("JIRA_EMAIL") or "").strip() or None
+    jira_api_token: str | None = (os.getenv("JIRA_API_TOKEN") or "").strip() or None
+    jira_project_key: str | None = (os.getenv("JIRA_PROJECT_KEY") or "").strip() or None
+    jira_story_points_field: str | None = (os.getenv("JIRA_STORY_POINTS_FIELD") or "").strip() or None
 
     @property
     def jira_configured(self) -> bool:

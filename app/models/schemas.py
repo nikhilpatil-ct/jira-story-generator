@@ -1,4 +1,6 @@
 from enum import Enum
+from typing import Annotated, Literal, Union
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -12,9 +14,17 @@ class Priority(str, Enum):
 
 
 class IssueType(str, Enum):
+    EPIC = "Epic"
     STORY = "Story"
     TASK = "Task"
     BUG = "Bug"
+
+
+class Severity(str, Enum):
+    CRITICAL = "Critical"
+    MAJOR = "Major"
+    MINOR = "Minor"
+    TRIVIAL = "Trivial"
 
 
 class ExtractedRequirement(BaseModel):
@@ -23,22 +33,51 @@ class ExtractedRequirement(BaseModel):
         description="The relevant portion of the source text this requirement is based on, summarized in the analyst's own words"
     )
     rationale: str = Field(description="Why this was identified as a distinct, independently deliverable story")
+    issue_type: IssueType = Field(
+        description="Epic for a large multi-story initiative/theme, Bug for a reported defect or broken behavior, "
+        "Story for a normal independently shippable increment of value"
+    )
 
 
 class ExtractionResult(BaseModel):
     requirements: list[ExtractedRequirement]
+    action_items: list[str] = Field(
+        default_factory=list,
+        description="Concrete follow-up tasks or to-dos mentioned that are not themselves full stories (e.g. 'schedule a follow-up with design')",
+    )
+    risks: list[str] = Field(
+        default_factory=list,
+        description="Risks, blockers, or concerns raised in the source text (technical, scheduling, or business)",
+    )
     open_questions: list[str] = Field(
         default_factory=list,
         description="Ambiguities or missing details in the source text that would materially improve story quality if clarified",
     )
 
 
-class JiraStory(BaseModel):
+# Each issue type gets its own focused schema rather than one combined model: Claude's structured-output
+# grammar compiler rejects/times out on a single schema mixing all Epic+Story+Bug fields ("Schema is too
+# complex" / "Grammar compilation timed out"), so each LLM call is made against one narrow schema.
+
+
+class JiraEpic(BaseModel):
+    issue_type: Literal[IssueType.EPIC] = IssueType.EPIC
     summary: str = Field(description="Concise JIRA issue summary/title, under 100 characters")
-    user_story: str = Field(
-        description="Story in 'As a <role>, I want <capability>, so that <benefit>' format"
-    )
+    description: str = Field(description="Additional context and background for the epic")
+    priority: Priority
+    labels: list[str] = Field(default_factory=list)
+    business_value: str = Field(description="The business value/why this epic matters")
+    goal: str = Field(description="The overall goal/outcome of the epic")
+    success_criteria: list[str] = Field(description="3-6 measurable criteria for the epic being complete")
+
+
+class JiraUserStory(BaseModel):
+    issue_type: Literal[IssueType.STORY] = IssueType.STORY
+    summary: str = Field(description="Concise JIRA issue summary/title, under 100 characters")
     description: str = Field(description="Additional context and background for the story")
+    priority: Priority
+    labels: list[str] = Field(default_factory=list)
+    user_story: str = Field(description="'As a <role>, I want <capability>, so that <benefit>'")
     acceptance_criteria: list[str] = Field(
         description="3-6 concrete, testable acceptance criteria, each a single self-contained statement"
     )
@@ -46,9 +85,23 @@ class JiraStory(BaseModel):
         default=None,
         description="Estimated effort on a Fibonacci-like scale (1, 2, 3, 5, 8, 13). Null only if truly not estimable.",
     )
+
+
+class JiraBug(BaseModel):
+    issue_type: Literal[IssueType.BUG] = IssueType.BUG
+    summary: str = Field(description="Concise JIRA issue summary/title, under 100 characters")
+    description: str = Field(description="Additional context and background for the bug")
     priority: Priority
     labels: list[str] = Field(default_factory=list)
-    issue_type: IssueType = IssueType.STORY
+    steps_to_reproduce: list[str] = Field(description="Ordered, concrete repro steps")
+    expected_result: str = Field(description="What should happen")
+    actual_result: str = Field(description="What actually happens")
+    severity: Severity
+    environment: str | None = Field(default=None, description="Browser/OS/deployment context if mentioned")
+    root_cause: str | None = Field(default=None, description="Only if inferable from the source text")
+
+
+JiraItem = Annotated[Union[JiraEpic, JiraUserStory, JiraBug], Field(discriminator="issue_type")]
 
 
 class ValidationIssue(BaseModel):
@@ -63,10 +116,33 @@ class ValidationResult(BaseModel):
     issues: list[ValidationIssue] = Field(default_factory=list)
 
 
+class TestCase(BaseModel):
+    title: str = Field(description="Short name for the test case")
+    steps: list[str] = Field(description="Ordered steps to execute the test")
+    expected_result: str = Field(description="What should happen if the item behaves correctly")
+
+
+class TestCasesResult(BaseModel):
+    test_cases: list[TestCase]
+
+
+class RiskItem(BaseModel):
+    risk: str = Field(description="The risk itself")
+    impact: str = Field(description="What happens if it materializes")
+    mitigation: str = Field(description="Concrete suggestion to reduce or handle the risk")
+
+
+class RiskAnalysisResult(BaseModel):
+    risks: list[RiskItem]
+
+
 class GeneratedStory(BaseModel):
-    story: JiraStory
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    story: JiraItem
     validation: ValidationResult
     attempts: int
+    test_cases: list[TestCase] = Field(default_factory=list)
+    risks: list[RiskItem] = Field(default_factory=list)
 
 
 class OrchestratorAction(str, Enum):
@@ -74,6 +150,7 @@ class OrchestratorAction(str, Enum):
     READY_TO_GENERATE = "ready_to_generate"
     CONFIRM_CREATE = "confirm_create"
     REVISE = "revise"
+    REGENERATE = "regenerate"
     CHAT = "chat"
 
 
@@ -85,4 +162,10 @@ class OrchestratorDecision(BaseModel):
     )
     revision_instructions: str | None = Field(
         default=None, description="Specific instructions for revision, only set for the 'revise' action"
+    )
+    generation_scope: list[IssueType] | None = Field(
+        default=None,
+        description="Set for 'ready_to_generate' or 'regenerate' when the user asked to limit generation to "
+        "specific issue types (e.g. 'generate bugs only' -> [Bug], 'generate the epic' -> [Epic]). "
+        "Null/omitted means generate everything found.",
     )

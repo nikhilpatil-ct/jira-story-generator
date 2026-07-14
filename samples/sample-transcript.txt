@@ -1,0 +1,33 @@
+[00:00:12] Sarah (PM): Okay, um, let's get started. Thanks everyone for joining the sprint planning call.
+[00:00:19] Sarah (PM): So, uh, today we need to go over the new account features and also the bugs QA found this week.
+
+[00:00:31] Raj (Eng Lead): Sure. So, so, first up — customers keep asking for a way to reset their password without calling support.
+[00:00:45] Raj (Eng Lead): As it stands, if a customer forgets their password, they have to email us, and someone on support manually resets it. That's, like, a huge bottleneck.
+[00:00:58] Priya (Design): Right, right. I think we should let a customer request a reset link by email, they click it, and set a new password themselves. Pretty standard flow.
+[00:01:10] Sarah (PM): Agreed. This is high priority, we've had a lot of complaints. Let's call it urgent.
+[00:01:15] Raj (Eng Lead): Okay okay, makes sense. We'll need rate limiting on the reset request too, otherwise someone could spam it.
+[00:01:28] Priya (Design): Yeah and the reset link should expire, obviously, so it can't be reused later.
+
+[00:01:40] Sarah (PM): Next, um, bigger picture item. We want to basically overhaul the entire onboarding experience for new customers over the next couple of quarters.
+[00:01:55] Sarah (PM): Right now new users land on a blank dashboard with zero guidance, and our activation numbers are pretty bad.
+[00:02:05] Priya (Design): This is a big initiative — we're talking a guided setup wizard, sample data, in-app tips, the works. It's going to take several stories to get right.
+[00:02:20] Raj (Eng Lead): Yeah, that's definitely not a single story, that's a whole theme of work. Let's track it as one big initiative and break it down later.
+[00:02:30] Sarah (PM): Good call. The business goal is to increase activation rate within the first 7 days — right now it's around 22%, we want to get to 40%+.
+
+[00:02:45] Raj (Eng Lead): Alright, uh, now onto bugs. QA logged a nasty one yesterday.
+[00:02:52] Raj (Eng Lead): If a customer's cart is empty and they somehow land on the checkout page — like via a stale bookmark or back button — and they click "Pay Now", the whole page throws a 500 error.
+[00:03:05] Priya (Design): Oh that's bad. What does the user see?
+[00:03:08] Raj (Eng Lead): Just a raw server error page, no friendly message, nothing. We saw it in the staging logs, full stack trace and everything, so we know exactly where it's breaking — the order total calculation divides by the item count and crashes on zero items.
+[00:03:25] Sarah (PM): Ouch. That needs to just show a "your cart is empty" message and disable the Pay Now button entirely if there's nothing in the cart. This is urgent too, it's a broken checkout path.
+[00:03:38] Raj (Eng Lead): Got it, I'll mark it high severity. It reproduces reliably in Chrome on staging, haven't checked other browsers yet.
+
+[00:03:50] Sarah (PM): One more bug — the notifications bell icon shows a red badge with a count, but when you click it, sometimes the list is empty even though the badge says "3".
+[00:04:05] Priya (Design): I've seen that too, it happens after switching between two browser tabs quickly. Feels like a caching or race condition issue in the frontend.
+[00:04:15] Raj (Eng Lead): Hmm, we haven't root-caused that one yet, but it's annoying rather than breaking anything. I'd call that medium priority, not urgent.
+
+[00:04:28] Sarah (PM): Okay, last thing — action items. Priya, can you send over the updated onboarding wireframes by Friday?
+[00:04:36] Priya (Design): Yep, will do.
+[00:04:38] Sarah (PM): And Raj, can you loop in the infra team about rate limiting the password reset endpoint before we ship it?
+[00:04:45] Raj (Eng Lead): Sure, I'll ping them today.
+[00:04:48] Sarah (PM): Great. One open question for everyone to think about — should the password reset flow support SSO users, or just email/password accounts? We didn't decide that yet.
+[00:05:02] Sarah (PM): Alright, I think that covers it. Thanks all, talk soon.
