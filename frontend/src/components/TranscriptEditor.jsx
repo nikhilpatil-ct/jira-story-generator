@@ -77,7 +77,7 @@ export default function TranscriptEditor() {
       }}
     >
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--border-subtle)]">
-        <div className="text-sm font-medium text-[var(--text-secondary)]">Meeting Transcript</div>
+        <div className="text-sm font-medium text-[var(--text-secondary)]">Transcript / BRD</div>
         <button
           onClick={handleGenerate}
           disabled={sending || !hasTranscript}
@@ -104,7 +104,7 @@ export default function TranscriptEditor() {
           >
             <span className="text-2xl">⇧</span>
             <span className="text-sm font-medium text-[var(--text-secondary)]">
-              {uploading ? 'Uploading…' : 'Drag & drop a transcript file, or click to upload'}
+              {uploading ? 'Uploading…' : 'Drag & drop a transcript or BRD file, or click to upload'}
             </span>
             <span className="text-xs text-[var(--text-tertiary)]">.txt, .md, .docx, or .pdf</span>
           </button>

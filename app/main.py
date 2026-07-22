@@ -102,6 +102,44 @@ def _log(state: session_store.SessionState, stage: str, message: str) -> None:
     state.logs.append({"stage": stage, "message": message, "ts": session_store.now_iso()})
 
 
+def _find_created_epic_key(state: session_store.SessionState) -> str | None:
+    """The JIRA key of this session's Epic, if one has already been created — used to link newly
+    created Stories/Bugs under it."""
+    for gs in state.stories:
+        if isinstance(gs.story, JiraEpic):
+            match = next((r for r in state.jira_results if r.get("id") == gs.id and r.get("key")), None)
+            if match:
+                return match["key"]
+    return None
+
+
+async def _create_in_jira(
+    state: session_store.SessionState, items: list[GeneratedStory], log_prefix: str = "jira"
+) -> list[dict]:
+    """Create the given items in JIRA. Any Epic in the batch is created first; every non-Epic item is
+    then linked as a child of that (or an already-created) Epic, so a generation run lands in JIRA as a
+    connected Epic + Stories/Bugs hierarchy instead of flat, unrelated issues."""
+    ordered = sorted(items, key=lambda gs: 0 if isinstance(gs.story, JiraEpic) else 1)
+    epic_key = _find_created_epic_key(state)
+    results: list[dict] = []
+    for gs in ordered:
+        story = gs.story
+        try:
+            if isinstance(story, JiraEpic):
+                result = await jira_client.create_issue(story, test_cases=gs.test_cases)
+                epic_key = result["key"]
+                _log(state, log_prefix, f"Created epic {result['key']} for \"{story.summary}\"")
+            else:
+                result = await jira_client.create_issue(story, epic_key=epic_key, test_cases=gs.test_cases)
+                note = f" (linked to epic {epic_key})" if epic_key else ""
+                _log(state, log_prefix, f"Created {result['key']} for \"{story.summary}\"{note}")
+            results.append({"id": gs.id, "summary": story.summary, **result})
+        except jira_client.JiraError as exc:
+            _log(state, log_prefix, f"FAILED to create \"{story.summary}\": {exc}")
+            results.append({"id": gs.id, "summary": story.summary, "error": str(exc)})
+    return results
+
+
 async def _run_generation(
     state: session_store.SessionState, generation_scope: list[IssueType] | None, auto_create_jira: bool
 ) -> str:
@@ -148,15 +186,9 @@ async def _run_generation(
                     {"id": gs.id, "summary": gs.story.summary, "held_for_review": True, "reason": reason}
                 )
                 _log(state, "jira", f"Held \"{gs.story.summary}\" (score {gs.validation.score}/100) for BA review — not auto-created")
-            for gs in to_create:
-                state.jira_results = [r for r in state.jira_results if r.get("id") != gs.id]
-                try:
-                    result = await jira_client.create_issue(gs.story)
-                    state.jira_results.append({"id": gs.id, "summary": gs.story.summary, **result})
-                    _log(state, "jira", f"Created {result['key']} for \"{gs.story.summary}\"")
-                except jira_client.JiraError as exc:
-                    state.jira_results.append({"id": gs.id, "summary": gs.story.summary, "error": str(exc)})
-                    _log(state, "jira", f"FAILED to auto-create \"{gs.story.summary}\": {exc}")
+            to_create_ids = {gs.id for gs in to_create}
+            state.jira_results = [r for r in state.jira_results if r.get("id") not in to_create_ids]
+            state.jira_results.extend(await _create_in_jira(state, to_create))
             if held:
                 held_list = ", ".join(f"\"{gs.story.summary}\" ({gs.validation.score}/100)" for gs in held)
                 held_note = (
@@ -269,14 +301,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
                 if len(to_create) < len(state.stories):
                     _log(state, "jira", f"Skipping {len(state.stories) - len(to_create)} item(s) already created in JIRA")
                 _log(state, "jira", f"Creating {len(to_create)} item(s) in JIRA project {settings.jira_project_key}")
-                for gs in to_create:
-                    try:
-                        result = await jira_client.create_issue(gs.story)
-                        jira_results.append({"id": gs.id, "summary": gs.story.summary, **result})
-                        _log(state, "jira", f"Created {result['key']} for \"{gs.story.summary}\"")
-                    except jira_client.JiraError as exc:
-                        jira_results.append({"id": gs.id, "summary": gs.story.summary, "error": str(exc)})
-                        _log(state, "jira", f"FAILED to create \"{gs.story.summary}\": {exc}")
+                jira_results = jira_results + await _create_in_jira(state, to_create)
                 state.jira_results = jira_results
                 state.stage = "done"
                 reply = format_jira_results_reply(jira_results)
@@ -436,7 +461,10 @@ async def jira_preview(session_id: str, index: int) -> dict:
         raise HTTPException(status_code=404, detail="Item not found")
     if not settings.jira_configured:
         raise HTTPException(status_code=400, detail="JIRA is not configured")
-    return jira_client.build_fields(state.stories[index].story)
+    gs = state.stories[index]
+    story = gs.story
+    epic_key = None if isinstance(story, JiraEpic) else _find_created_epic_key(state)
+    return jira_client.build_fields(story, epic_key=epic_key, test_cases=gs.test_cases)
 
 
 @app.post("/api/jira/retry")
@@ -455,12 +483,14 @@ async def jira_retry(req: JiraRetryRequest) -> dict:
     try:
         if existing:
             _log(state, "jira", f"Updating {existing['key']} with latest changes: \"{story.summary}\"")
-            result = await jira_client.update_issue(existing["key"], story)
+            result = await jira_client.update_issue(existing["key"], story, test_cases=gs.test_cases)
             entry = {"id": gs.id, "summary": story.summary, **result}
             _log(state, "jira", f"Updated {result['key']} for \"{story.summary}\"")
         else:
-            _log(state, "jira", f"Creating {story.issue_type.value} in JIRA: \"{story.summary}\"")
-            result = await jira_client.create_issue(story)
+            epic_key = None if isinstance(story, JiraEpic) else _find_created_epic_key(state)
+            link_note = f" (linking to epic {epic_key})" if epic_key else ""
+            _log(state, "jira", f"Creating {story.issue_type.value} in JIRA: \"{story.summary}\"{link_note}")
+            result = await jira_client.create_issue(story, epic_key=epic_key, test_cases=gs.test_cases)
             entry = {"id": gs.id, "summary": story.summary, **result}
             _log(state, "jira", f"Created {result['key']} for \"{story.summary}\"")
     except jira_client.JiraError as exc:

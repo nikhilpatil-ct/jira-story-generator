@@ -34,6 +34,10 @@ class Settings:
     jira_api_token: str | None = (os.getenv("JIRA_API_TOKEN") or "").strip() or None
     jira_project_key: str | None = (os.getenv("JIRA_PROJECT_KEY") or "").strip() or None
     jira_story_points_field: str | None = (os.getenv("JIRA_STORY_POINTS_FIELD") or "").strip() or None
+    # Field used to attach a Story/Bug/Task to its parent Epic. Team-managed (default) Cloud projects
+    # use the native "parent" field; a classic company-managed project still on the legacy Epic Link
+    # needs its custom field id here instead (e.g. "customfield_10014").
+    jira_epic_link_field: str | None = (os.getenv("JIRA_EPIC_LINK_FIELD") or "").strip() or None
 
     @property
     def jira_configured(self) -> bool:

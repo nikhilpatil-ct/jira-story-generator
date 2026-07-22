@@ -1,6 +1,6 @@
 import asyncio
 
-from app.agents import clarifier, drafter, extractor, validator
+from app.agents import clarifier, drafter, extractor, story_actions, validator
 from app.config import settings
 from app.models.schemas import ExtractionResult, GeneratedStory, IssueType
 from app.services import (
@@ -22,9 +22,11 @@ async def generate_stories(
         session_store.append_log(session_id, stage, message)
 
     session_store.update_step(session_id, "cleaning")
-    log("cleaning", f"Cleaning transcript ({len(conversation_text):,} characters)...")
+    is_transcript = transcript_cleaner.looks_like_transcript(conversation_text)
+    kind = "meeting transcript" if is_transcript else "structured document (e.g. BRD/PRD)"
+    log("cleaning", f"Detected {kind} ({len(conversation_text):,} characters) — cleaning...")
     cleaned = transcript_cleaner.clean(conversation_text)
-    log("cleaning", f"Cleaned transcript: {len(conversation_text):,} -> {len(cleaned):,} characters")
+    log("cleaning", f"Cleaned input: {len(conversation_text):,} -> {len(cleaned):,} characters")
 
     # Redact PII BEFORE any LLM call (translation/extraction) so raw personal data never leaves the
     # local boundary. This ordering is a compliance guarantee: every downstream model only ever sees
@@ -145,10 +147,18 @@ async def generate_stories(
                 attempts += 1
                 log("validating", f"Re-validated \"{story.summary}\": score {result.score}/100")
 
+            log("drafting", f"Writing test cases for \"{story.summary}\"...")
+            try:
+                test_cases = (await story_actions.generate_test_cases(story)).test_cases
+                log("drafting", f"Wrote {len(test_cases)} test case(s) for \"{story.summary}\"")
+            except Exception as exc:  # noqa: BLE001 - a test-case hiccup must never block drafting
+                log("drafting", f"Could not write test cases for \"{story.summary}\" ({exc}) — continuing without them")
+                test_cases = []
+
             # Single-threaded event loop: this read-modify-write between awaits is safe without a lock.
             completed += 1
             log("drafting", f"Finished {completed}/{total}: \"{story.summary}\"")
-            return GeneratedStory(story=story, validation=result, attempts=attempts)
+            return GeneratedStory(story=story, validation=result, attempts=attempts, test_cases=test_cases)
 
     # return_exceptions=True so one item failing (even after retries) doesn't discard the items that succeeded.
     try:

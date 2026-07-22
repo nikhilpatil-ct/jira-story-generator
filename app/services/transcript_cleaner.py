@@ -15,6 +15,18 @@ _WHITESPACE_RE = re.compile(r"[ \t]{2,}")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 
 
+def looks_like_transcript(text: str) -> bool:
+    """Heuristic: does this read like a spoken meeting transcript (timestamps / "Name:" speaker
+    turns) rather than a structured document (BRD, PRD, spec)? Structured documents skip the
+    speech-cleanup passes below, since filler-word/speaker-label stripping is tuned for spoken
+    dialogue and would otherwise clip legitimate prose (e.g. "actually" inside a requirement)."""
+    lines = [line for line in text.split("\n") if line.strip()]
+    if not lines:
+        return False
+    signal_lines = sum(1 for line in lines if _TIMESTAMP_RE.search(line) or _SPEAKER_LABEL_RE.match(line))
+    return signal_lines / len(lines) > 0.15
+
+
 def _dedupe_sentences(text: str) -> str:
     seen: set[str] = set()
     out_lines = []
@@ -29,14 +41,17 @@ def _dedupe_sentences(text: str) -> str:
 
 
 def clean(raw_text: str) -> str:
-    """Deterministic, non-LLM preprocessing: strip ASR noise/filler so the extractor sees clean text."""
+    """Deterministic, non-LLM preprocessing. Spoken transcripts get full ASR/filler cleanup;
+    structured documents (BRDs, specs) only get whitespace/blank-line normalization, since they
+    have no timestamps/filler speech to strip and the speech-cleanup regexes could clip prose."""
     text = raw_text.replace("\r\n", "\n")
-    text = _TIMESTAMP_RE.sub("", text)
-    text = _LAUGH_NOISE_RE.sub("", text)
-    text = _SPEAKER_LABEL_RE.sub(lambda m: f"{m.group(1).strip()}: ", text)
-    text = _FILLER_WORDS_RE.sub("", text)
-    text = _WORD_REPEAT_RE.sub(r"\1", text)
-    text = _dedupe_sentences(text)
+    if looks_like_transcript(text):
+        text = _TIMESTAMP_RE.sub("", text)
+        text = _LAUGH_NOISE_RE.sub("", text)
+        text = _SPEAKER_LABEL_RE.sub(lambda m: f"{m.group(1).strip()}: ", text)
+        text = _FILLER_WORDS_RE.sub("", text)
+        text = _WORD_REPEAT_RE.sub(r"\1", text)
+        text = _dedupe_sentences(text)
     text = _WHITESPACE_RE.sub(" ", text)
     text = _BLANK_LINES_RE.sub("\n\n", text)
     lines = [line.strip() for line in text.split("\n")]
