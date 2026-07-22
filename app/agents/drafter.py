@@ -41,7 +41,9 @@ the original unless the feedback asks for more or less.
 """
 
 
-async def draft(requirement: ExtractedRequirement, context: str, app_context: str = "") -> JiraItem:
+async def draft(
+    requirement: ExtractedRequirement, context: str, app_context: str = "", clarifications: str = ""
+) -> JiraItem:
     issue_type = requirement.issue_type if requirement.issue_type in DRAFT_OUTPUT_FORMATS else IssueType.STORY
     app_block = ""
     if app_context:
@@ -52,8 +54,18 @@ async def draft(requirement: ExtractedRequirement, context: str, app_context: st
             "does not support; it is background knowledge, not a new source of scope:\n"
             f"{app_context}\n\n"
         )
+    clarification_block = ""
+    if clarifications:
+        clarification_block = (
+            "The user answered these clarifying questions about this specific item. Treat the answers as "
+            "authoritative ground truth and use them to fill the gaps they address — do not contradict or "
+            "second-guess them. For any detail still not specified here or in the source, make a reasonable "
+            "assumption and state it explicitly rather than inventing a confident specific:\n"
+            f"{clarifications}\n\n"
+        )
     user_content = (
         f"{app_block}"
+        f"{clarification_block}"
         f"Original source context:\n{context}\n\n"
         f"Requirement to turn into a JIRA {issue_type.value}:\n"
         f"Title: {requirement.title}\n"

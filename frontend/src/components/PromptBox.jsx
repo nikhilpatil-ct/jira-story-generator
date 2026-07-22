@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSession } from '../state/SessionContext'
+import ClarifyingQuestions from './ClarifyingQuestions'
 
 const QUICK_COMMANDS = [
   'Generate bugs only',
@@ -10,6 +11,11 @@ const QUICK_COMMANDS = [
 
 const TRANSCRIPT_DISPLAY_THRESHOLD = 240
 
+// While the pipeline is on one of these steps, the Workflow panel already shows live progress, so the chat
+// area stays quiet. The chat loader only appears once the workflow is done (or for a plain chat with no
+// workflow at all), covering the gap between "workflow done" and the reply actually landing in the chat.
+const WORKFLOW_STEPS = ['cleaning', 'extracting', 'context', 'clarifying', 'drafting', 'validating']
+
 function displayFor(message) {
   if (message.role === 'user' && message.content.length > TRANSCRIPT_DISPLAY_THRESHOLD) {
     return '📄 Transcript uploaded by user'
@@ -17,16 +23,29 @@ function displayFor(message) {
   return message.content
 }
 
+function ChatLoader() {
+  return (
+    <div className="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
+      <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin shrink-0" />
+      Loading chat…
+    </div>
+  )
+}
+
 export default function PromptBox() {
-  const { session, sendMessage, sending, error } = useSession()
+  const { session, sendMessage, sending, error, currentStep } = useSession()
   const [input, setInput] = useState('')
   const logRef = useRef(null)
 
   const history = session?.history || []
+  const hasPendingQuestions = (session?.pending_questions?.length ?? 0) > 0
+  const workflowRunning = sending && WORKFLOW_STEPS.includes(currentStep)
+  // Waiting on the reply, but not mid-workflow (that shows in the Workflow panel) and not blocked on questions.
+  const chatLoading = sending && !workflowRunning && !hasPendingQuestions
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
-  }, [history.length, sending])
+  }, [history.length, sending, currentStep])
 
   async function submit(text) {
     const trimmed = text.trim()
@@ -64,13 +83,19 @@ export default function PromptBox() {
               {displayFor(m)}
             </div>
           ))}
-          {sending && <div className="text-xs text-[var(--text-tertiary)] italic">Thinking…</div>}
+          {chatLoading && <ChatLoader />}
         </div>
       )}
 
+      {hasPendingQuestions && <ClarifyingQuestions />}
+
       {history.length === 0 && (
         <div className="flex-1 min-h-0 flex items-center justify-center rounded-xl border border-dashed border-[var(--border-subtle)] text-sm text-[var(--text-tertiary)] text-center px-8">
-          Upload a transcript and click "Generate Items", or type a message below to get started.
+          {chatLoading ? (
+            <ChatLoader />
+          ) : (
+            'Upload a transcript and click "Generate Items", or type a message below to get started.'
+          )}
         </div>
       )}
 

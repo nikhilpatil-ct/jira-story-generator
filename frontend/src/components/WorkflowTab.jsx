@@ -22,6 +22,12 @@ const STEPS = [
     logStages: ['context'],
   },
   {
+    key: 'clarifying',
+    label: 'Clarify details',
+    detail: 'Ask you about anything ambiguous before drafting, so items are grounded not guessed',
+    logStages: ['clarifying'],
+  },
+  {
     key: 'drafting',
     label: 'Draft items',
     detail: 'Write each JIRA item with type-specific fields',
@@ -122,7 +128,10 @@ export default function WorkflowTab() {
     )
   }
 
-  const visibleSteps = STEPS.filter((s) => s.key !== 'jira' || logs.some((l) => l.stage === 'jira'))
+  // Hide the optional steps (clarify, jira) until they actually have activity, so a plain run stays tidy.
+  const visibleSteps = STEPS.filter(
+    (s) => !['clarifying', 'jira'].includes(s.key) || logs.some((l) => s.logStages.includes(l.stage))
+  )
 
   return (
     <div className="space-y-0.5">

@@ -48,6 +48,13 @@ export const api = {
       body: JSON.stringify({ action, instructions }),
     }).then(handle),
 
+  submitClarification: (sessionId, groupId, answers, skip = false) =>
+    fetch(`/api/clarify/${sessionId}`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ group_id: groupId, answers, skip }),
+    }).then(handle),
+
   jiraPreview: (sessionId, index) => fetch(`/api/sessions/${sessionId}/jira-preview/${index}`).then(handle),
 
   jiraRetry: (sessionId, index) =>

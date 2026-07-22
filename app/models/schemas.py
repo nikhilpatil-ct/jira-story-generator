@@ -104,6 +104,27 @@ class JiraBug(BaseModel):
 JiraItem = Annotated[Union[JiraEpic, JiraUserStory, JiraBug], Field(discriminator="issue_type")]
 
 
+class ClarifyingQuestionDraft(BaseModel):
+    """One question the drafter needs answered before it can write an item without inventing details."""
+
+    question: str = Field(
+        description="A single, concrete, self-contained question a stakeholder can answer in one sentence"
+    )
+    reason: str = Field(
+        description="Short note naming exactly which part of the item this affects and what would otherwise be guessed"
+    )
+
+
+class ClarificationCheck(BaseModel):
+    """Result of reviewing one requirement for must-ask ambiguities before drafting."""
+
+    questions: list[ClarifyingQuestionDraft] = Field(
+        default_factory=list,
+        description="Empty when the source text and app context already contain everything needed. Otherwise the "
+        "minimal set of questions whose answers would materially change the drafted item.",
+    )
+
+
 class ValidationIssue(BaseModel):
     field: str = Field(description="Which part of the story has the problem, e.g. 'acceptance_criteria'")
     problem: str

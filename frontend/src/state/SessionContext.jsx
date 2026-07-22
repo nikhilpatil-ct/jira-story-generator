@@ -8,6 +8,7 @@ const STEP_LABELS = {
   cleaning: 'Cleaning transcript',
   extracting: 'Extracting requirements',
   context: 'Loading app context',
+  clarifying: 'Clarifying details',
   drafting: 'Drafting items',
   validating: 'Validating',
   done: 'Done',
@@ -126,6 +127,18 @@ export function SessionProvider({ children }) {
     [activeSessionId, sending, autoCreateJira, startPolling, stopPolling, loadSession, refreshSessions]
   )
 
+  const submitClarification = useCallback(
+    async (groupId, answers, skip = false) => {
+      if (!activeSessionId) return null
+      const result = await api.submitClarification(activeSessionId, groupId, answers, skip)
+      // Refresh immediately so the answered item drops out of the form without waiting for the next poll
+      // tick; the drafting run (still in the open /api/chat request) resumes server-side on its own.
+      await loadSession(activeSessionId).catch(() => {})
+      return result
+    },
+    [activeSessionId, loadSession]
+  )
+
   const renameSession = useCallback(
     async (id, title) => {
       await api.patchSession(id, { title })
@@ -191,6 +204,7 @@ export function SessionProvider({ children }) {
     toggleFavorite,
     deleteSession: deleteSessionById,
     runStoryAction,
+    submitClarification,
     refreshSessions,
     refreshActiveSession: () => (activeSessionId ? loadSession(activeSessionId) : Promise.resolve(null)),
   }

@@ -1,9 +1,16 @@
 import asyncio
 
-from app.agents import drafter, extractor, validator
+from app.agents import clarifier, drafter, extractor, validator
 from app.config import settings
 from app.models.schemas import ExtractionResult, GeneratedStory, IssueType
-from app.services import app_context, pii_redactor, session_store, transcript_cleaner, translator
+from app.services import (
+    app_context,
+    clarification_store,
+    pii_redactor,
+    session_store,
+    transcript_cleaner,
+    translator,
+)
 
 
 async def generate_stories(
@@ -68,13 +75,17 @@ async def generate_stories(
     total = len(requirements)
     log("drafting", f"Drafting {total} item(s) in parallel (up to {settings.max_concurrent_drafts} at a time)...")
 
+    # Each concurrent draft may pause to ask the user its own questions, so start from a clean slate: drop
+    # any leftover question groups from a previous (e.g. abandoned) run of this same session.
+    clarification_store.clear_session(session_id)
+
     # Bound concurrency so a large transcript doesn't fire dozens of simultaneous calls at the API and
     # trip rate limits. asyncio.gather runs these coroutines concurrently on the event loop — the right
     # kind of parallelism here since every LLM call is async I/O (threads would add overhead, not speed).
     semaphore = asyncio.Semaphore(settings.max_concurrent_drafts)
     completed = 0
 
-    async def draft_and_validate(requirement) -> GeneratedStory:
+    async def draft_and_validate(requirement, item_index: int) -> GeneratedStory:
         nonlocal completed
         # Ground this specific item in the app(s) it mentions; fall back to the transcript-level matches
         # when the requirement text alone names none. Detection is cheap/deterministic, so it's fine per item.
@@ -82,9 +93,42 @@ async def generate_stories(
         req_apps = app_context.detect_apps(req_text, catalog) or transcript_apps
         app_ctx = app_context.build_context(req_apps)
         grounding = f" (context: {', '.join(a['name'] for a in req_apps)})" if req_apps else ""
+
+        # Anti-hallucination gate: before writing anything, ask whether this item is missing facts we'd
+        # otherwise have to invent. Each item raises its own questions independently (that's the "multi-
+        # threaded" part), so every question is tagged with this item's index/title/type before it reaches
+        # the user — the UI groups them per item so concurrent questions never blur together. The wait
+        # itself holds NO semaphore slot, so one item pausing for an answer never blocks the others' drafts.
+        clarifications = ""
+        if settings.clarifying_questions_enabled:
+            async with semaphore:  # the clarifier is an LLM call — bound it like any other
+                log("clarifying", f"Reviewing \"{requirement.title}\" for missing details...")
+                try:
+                    questions = await clarifier.clarify(requirement, cleaned, app_context=app_ctx)
+                except Exception as exc:  # noqa: BLE001 - a clarifier hiccup must never block drafting
+                    log("clarifying", f"Could not review \"{requirement.title}\" ({exc}) — drafting as-is")
+                    questions = []
+            if questions:
+                payload = [
+                    {"id": f"{item_index}-{n}", "question": q.question, "reason": q.reason}
+                    for n, q in enumerate(questions)
+                ]
+                group = clarification_store.open_group(
+                    session_id, item_index, requirement.title, requirement.issue_type.value, payload
+                )
+                log("clarifying", f"Asked {len(payload)} question(s) about \"{requirement.title}\" — waiting for you...")
+                status = await clarification_store.wait_for_answers(group, settings.clarification_timeout_seconds)
+                clarifications = clarification_store.answers_text(group)
+                if status == "answered":
+                    log("clarifying", f"Got your answers for \"{requirement.title}\" — drafting with them")
+                elif status == "skipped":
+                    log("clarifying", f"Skipped \"{requirement.title}\" — drafting with best-guess assumptions")
+                else:  # timeout
+                    log("clarifying", f"No answer for \"{requirement.title}\" in time — drafting with best-guess assumptions")
+
         async with semaphore:
             log("drafting", f"Drafting \"{requirement.title}\" [{requirement.issue_type.value}]{grounding}...")
-            story = await drafter.draft(requirement, cleaned, app_context=app_ctx)
+            story = await drafter.draft(requirement, cleaned, app_context=app_ctx, clarifications=clarifications)
             attempts = 1
             result = await validator.validate(story)
             log("validating", f"Validated \"{story.summary}\": score {result.score}/100" + ("" if result.is_valid else " (below quality bar)"))
@@ -107,7 +151,14 @@ async def generate_stories(
             return GeneratedStory(story=story, validation=result, attempts=attempts)
 
     # return_exceptions=True so one item failing (even after retries) doesn't discard the items that succeeded.
-    results = await asyncio.gather(*(draft_and_validate(r) for r in requirements), return_exceptions=True)
+    try:
+        results = await asyncio.gather(
+            *(draft_and_validate(r, i) for i, r in enumerate(requirements)), return_exceptions=True
+        )
+    finally:
+        # Drop any pending question groups now that the fan-out is done, so a stale question can't linger
+        # in the poller's view after drafting has moved on.
+        clarification_store.clear_session(session_id)
 
     generated: list[GeneratedStory] = []  # preserves requirement order (gather returns results in input order)
     for requirement, result in zip(requirements, results):

@@ -131,13 +131,15 @@ export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
   const [preview, setPreview] = useState(null)
   const [creating, setCreating] = useState(false)
   const [localJiraResult, setLocalJiraResult] = useState(jiraResult)
+  const [customPrompt, setCustomPrompt] = useState('')
 
   const story = gs.story
 
-  async function runAction(action) {
+  async function runAction(action, instructions) {
     setBusyAction(action)
     try {
-      await runStoryAction(index, action)
+      await runStoryAction(index, action, instructions)
+      if (action === 'custom') setCustomPrompt('')
     } catch (err) {
       toast.error(err.message)
     } finally {
@@ -145,7 +147,17 @@ export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
     }
   }
 
+  function applyCustomPrompt() {
+    const trimmed = customPrompt.trim()
+    if (trimmed && busyAction !== 'custom') runAction('custom', trimmed)
+  }
+
   async function handlePreview() {
+    // Toggle: a second click hides the payload; opening always fetches a fresh copy of the current story.
+    if (preview) {
+      setPreview(null)
+      return
+    }
     try {
       const fields = await api.jiraPreview(activeSessionId, index)
       setPreview(fields)
@@ -206,21 +218,31 @@ export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
             </button>
           </span>
         ) : (
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              handleCreate()
-            }}
-            disabled={!jiraConfigured || creating}
-            title={jiraConfigured ? 'Create this item in JIRA' : 'JIRA not configured'}
-            className={`text-xs px-2.5 py-1 rounded-lg font-medium shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-              localJiraResult?.error
-                ? 'bg-[var(--danger)]/15 text-[var(--danger)] hover:bg-[var(--danger)]/25'
-                : 'bg-[var(--accent)] text-white hover:bg-[var(--accent-strong)]'
-            }`}
-          >
-            {creating ? '…' : localJiraResult?.error ? 'Retry' : 'Create'}
-          </button>
+          <span className="flex items-center gap-1.5 shrink-0">
+            {localJiraResult?.held_for_review && (
+              <span
+                title={localJiraResult.reason}
+                className="text-[10px] font-semibold px-2 py-0.5 rounded-full border border-[var(--warning)]/40 bg-[var(--warning)]/15 text-[var(--warning)] cursor-help"
+              >
+                Needs review
+              </span>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                handleCreate()
+              }}
+              disabled={!jiraConfigured || creating}
+              title={jiraConfigured ? 'Create this item in JIRA' : 'JIRA not configured'}
+              className={`text-xs px-2.5 py-1 rounded-lg font-medium shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                localJiraResult?.error
+                  ? 'bg-[var(--danger)]/15 text-[var(--danger)] hover:bg-[var(--danger)]/25'
+                  : 'bg-[var(--accent)] text-white hover:bg-[var(--accent-strong)]'
+              }`}
+            >
+              {creating ? '…' : localJiraResult?.error ? 'Retry' : 'Create'}
+            </button>
+          </span>
         )}
 
         <span className="text-[var(--text-tertiary)] shrink-0">{expanded ? '▾' : '▸'}</span>
@@ -298,16 +320,57 @@ export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
             <ActionButton label="Regenerate" onClick={() => runAction('regenerate')} busy={busyAction === 'regenerate'} />
           </div>
 
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              applyCustomPrompt()
+            }}
+            className="flex items-center gap-1.5 pt-1"
+          >
+            <input
+              value={customPrompt}
+              onChange={(e) => setCustomPrompt(e.target.value)}
+              disabled={busyAction === 'custom'}
+              placeholder='Or tell me exactly what to change (e.g. "add an AC for rate limiting")'
+              className="flex-1 min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-app)] px-2.5 py-1.5 text-xs outline-none focus:border-[var(--accent)] disabled:opacity-50"
+            />
+            <button
+              type="submit"
+              disabled={busyAction === 'custom' || !customPrompt.trim()}
+              className="text-xs px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-strong)] disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium transition-colors shrink-0"
+            >
+              {busyAction === 'custom' ? '…' : 'Apply'}
+            </button>
+          </form>
+
           <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-[var(--border-subtle)] mt-1">
-            <ActionButton label="Preview JIRA payload" onClick={handlePreview} disabled={!jiraConfigured} />
+            <ActionButton
+              label={preview ? 'Hide JIRA payload' : 'Preview JIRA payload'}
+              onClick={handlePreview}
+              disabled={!jiraConfigured}
+            />
             {!jiraConfigured && <span className="text-[10px] text-[var(--text-tertiary)]">JIRA not configured</span>}
             {localJiraResult?.error && <span className="text-xs text-[var(--danger)]">{localJiraResult.error}</span>}
+            {localJiraResult?.held_for_review && (
+              <span className="text-xs text-[var(--warning)]">{localJiraResult.reason}</span>
+            )}
           </div>
 
           {preview && (
-            <pre className="text-[10px] bg-[var(--bg-app)] rounded-lg p-2 overflow-x-auto max-h-48 overflow-y-auto">
-              {JSON.stringify(preview, null, 2)}
-            </pre>
+            <div className="rounded-lg bg-[var(--bg-app)] overflow-hidden">
+              <div className="flex items-center justify-between px-2 py-1 border-b border-[var(--border-subtle)]">
+                <span className="text-[10px] font-medium text-[var(--text-tertiary)]">JIRA payload</span>
+                <button
+                  onClick={() => setPreview(null)}
+                  className="text-[10px] px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                >
+                  Hide
+                </button>
+              </div>
+              <pre className="text-[10px] p-2 overflow-x-auto max-h-48 overflow-y-auto">
+                {JSON.stringify(preview, null, 2)}
+              </pre>
+            </div>
           )}
         </div>
       )}

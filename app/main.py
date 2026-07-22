@@ -14,7 +14,7 @@ from app.config import settings
 from app.formatting import format_jira_results_reply, format_stories_reply, summarize_stories
 from app.models.schemas import GeneratedStory, IssueType, JiraBug, JiraEpic, OrchestratorAction
 from app.pipeline import generate_stories
-from app.services import app_context, db, file_parser, jira_client, session_store
+from app.services import app_context, clarification_store, db, file_parser, jira_client, session_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -67,6 +67,12 @@ class JiraRetryRequest(BaseModel):
     index: int
 
 
+class ClarifyAnswerRequest(BaseModel):
+    group_id: str
+    answers: dict[str, str] = {}
+    skip: bool = False
+
+
 def _session_dict(state: session_store.SessionState) -> dict:
     return {
         "id": state.id,
@@ -84,6 +90,9 @@ def _session_dict(state: session_store.SessionState) -> dict:
         "jira_results": state.jira_results,
         "logs": state.logs,
         "summary": state.summary,
+        # Live, in-memory view of any per-item clarifying questions a drafting run is currently waiting on.
+        # Ephemeral (not stored in the DB) — the poller reads it here to render the answer forms mid-run.
+        "pending_questions": clarification_store.pending_view(state.id),
         "created_at": state.created_at,
         "updated_at": state.updated_at,
     }
@@ -119,10 +128,27 @@ async def _run_generation(
     state.risks = extraction.risks
     state.stage = "reviewing"
 
+    held_note = ""
     if auto_create_jira:
         if settings.jira_configured:
-            _log(state, "jira", f"Auto-create is on — creating {len(generated)} item(s) in JIRA")
-            for gs in generated:
+            # Gate auto-creation on quality: items that clear the bar are pushed automatically; the rest are
+            # held back for a BA to review and update, then create manually (via the Create button / "create
+            # these in JIRA"). This only affects AUTO-create — manual creation of a weak item is still allowed.
+            bar = settings.auto_create_min_score
+            to_create = [gs for gs in generated if gs.validation.score >= bar]
+            held = [gs for gs in generated if gs.validation.score < bar]
+            _log(state, "jira", f"Auto-create is on — creating {len(to_create)} item(s) meeting the quality bar (score >= {bar})")
+            for gs in held:
+                state.jira_results = [r for r in state.jira_results if r.get("id") != gs.id]
+                reason = (
+                    f"Held for manual review: quality score {gs.validation.score}/100 is below the auto-create "
+                    f"threshold of {bar}. A BA should review and update it before creating it in JIRA."
+                )
+                state.jira_results.append(
+                    {"id": gs.id, "summary": gs.story.summary, "held_for_review": True, "reason": reason}
+                )
+                _log(state, "jira", f"Held \"{gs.story.summary}\" (score {gs.validation.score}/100) for BA review — not auto-created")
+            for gs in to_create:
                 state.jira_results = [r for r in state.jira_results if r.get("id") != gs.id]
                 try:
                     result = await jira_client.create_issue(gs.story)
@@ -131,6 +157,12 @@ async def _run_generation(
                 except jira_client.JiraError as exc:
                     state.jira_results.append({"id": gs.id, "summary": gs.story.summary, "error": str(exc)})
                     _log(state, "jira", f"FAILED to auto-create \"{gs.story.summary}\": {exc}")
+            if held:
+                held_list = ", ".join(f"\"{gs.story.summary}\" ({gs.validation.score}/100)" for gs in held)
+                held_note = (
+                    f"\n\n⚠️ {len(held)} item(s) scored below the auto-create quality bar ({bar}) and were NOT "
+                    f"created — a BA should review and update them, then create them manually: {held_list}"
+                )
         else:
             _log(state, "jira", "Auto-create is on, but JIRA is not configured — skipping")
 
@@ -138,7 +170,7 @@ async def _run_generation(
     state.summary = await summarizer.summarize(
         state.stories, state.risks, state.open_questions, state.action_items
     )
-    return format_stories_reply(state.stories, state.open_questions)
+    return format_stories_reply(state.stories, state.open_questions) + held_note
 
 
 @app.get("/health")
@@ -286,6 +318,25 @@ async def chat(req: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=502, detail=f"Story generator error: {exc}") from exc
 
 
+@app.post("/api/clarify/{session_id}")
+async def submit_clarification(session_id: str, req: ClarifyAnswerRequest) -> dict:
+    """Answer (or skip) one item's clarifying questions, resuming the draft that is waiting on them.
+
+    The drafting run lives in the still-open POST /api/chat request; this call just fills the answers and
+    releases that item's wait, so it does not itself return the drafted story — the chat request does, once
+    every item has been drafted.
+    """
+    ok = clarification_store.submit(session_id, req.group_id, req.answers, req.skip)
+    if not ok:
+        raise HTTPException(status_code=409, detail="No pending clarification for this item (it may have already proceeded)")
+    state = session_store.get(session_id)
+    if state is not None:
+        answered = len([v for v in req.answers.values() if v and v.strip()])
+        verb = "Skipped" if req.skip else f"Answered {answered}"
+        session_store.append_log(session_id, "clarifying", f"{verb} clarification question(s) for item {int(req.group_id) + 1}")
+    return {"status": "ok"}
+
+
 @app.post("/api/stories/{session_id}/{index}/action")
 async def story_action(session_id: str, index: int, req: StoryActionRequest) -> dict:
     state = session_store.get(session_id)
@@ -310,6 +361,20 @@ async def story_action(session_id: str, index: int, req: StoryActionRequest) -> 
             )
         elif req.action == "expand_ac":
             new_story = await drafter.refine(current.story, story_actions.EXPAND_AC_FEEDBACK)
+            new_validation = await validator.validate(new_story)
+            state.stories[index] = GeneratedStory(
+                id=current.id,
+                story=new_story,
+                validation=new_validation,
+                attempts=current.attempts + 1,
+                test_cases=current.test_cases,
+                risks=current.risks,
+            )
+        elif req.action == "custom":
+            instructions = (req.instructions or "").strip()
+            if not instructions:
+                raise HTTPException(status_code=400, detail="A prompt describing what to change is required")
+            new_story = await drafter.refine(current.story, instructions)
             new_validation = await validator.validate(new_story)
             state.stories[index] = GeneratedStory(
                 id=current.id,
