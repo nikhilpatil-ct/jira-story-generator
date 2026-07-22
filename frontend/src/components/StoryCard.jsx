@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { api } from '../api'
 import { useSession } from '../state/SessionContext'
+import { useToast } from '../state/ToastContext'
 
 const TYPE_STYLES = {
   Epic: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
@@ -124,6 +125,7 @@ function Body({ story }) {
 
 export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
   const { runStoryAction, activeSessionId, refreshActiveSession } = useSession()
+  const toast = useToast()
   const [expanded, setExpanded] = useState(false)
   const [busyAction, setBusyAction] = useState(null)
   const [preview, setPreview] = useState(null)
@@ -137,7 +139,7 @@ export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
     try {
       await runStoryAction(index, action)
     } catch (err) {
-      alert(err.message)
+      toast.error(err.message)
     } finally {
       setBusyAction(null)
     }
@@ -148,7 +150,7 @@ export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
       const fields = await api.jiraPreview(activeSessionId, index)
       setPreview(fields)
     } catch (err) {
-      alert(err.message)
+      toast.error(err.message)
     }
   }
 
@@ -159,7 +161,7 @@ export default function StoryCard({ gs, index, jiraResult, jiraConfigured }) {
       setLocalJiraResult(result)
       await refreshActiveSession()
     } catch (err) {
-      alert(err.message)
+      toast.error(err.message)
     } finally {
       setCreating(false)
     }

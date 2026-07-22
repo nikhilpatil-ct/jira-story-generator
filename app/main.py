@@ -14,7 +14,7 @@ from app.config import settings
 from app.formatting import format_jira_results_reply, format_stories_reply, summarize_stories
 from app.models.schemas import GeneratedStory, IssueType, JiraBug, JiraEpic, OrchestratorAction
 from app.pipeline import generate_stories
-from app.services import db, file_parser, jira_client, session_store
+from app.services import app_context, db, file_parser, jira_client, session_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -34,6 +34,8 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    count = app_context.seed_catalog()
+    logging.getLogger(__name__).info("Seeded app knowledge catalog: %d application(s)", count)
 
 
 class ChatRequest(BaseModel):

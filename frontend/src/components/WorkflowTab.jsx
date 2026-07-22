@@ -16,6 +16,12 @@ const STEPS = [
     logStages: ['extracting'],
   },
   {
+    key: 'context',
+    label: 'Load app context',
+    detail: 'Detect which known apps are mentioned and load their business & tech context',
+    logStages: ['context'],
+  },
+  {
     key: 'drafting',
     label: 'Draft items',
     detail: 'Write each JIRA item with type-specific fields',

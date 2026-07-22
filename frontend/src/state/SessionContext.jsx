@@ -7,6 +7,7 @@ const STEP_LABELS = {
   idle: 'Idle',
   cleaning: 'Cleaning transcript',
   extracting: 'Extracting requirements',
+  context: 'Loading app context',
   drafting: 'Drafting items',
   validating: 'Validating',
   done: 'Done',

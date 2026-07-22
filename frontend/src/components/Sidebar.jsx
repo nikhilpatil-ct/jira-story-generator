@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSession } from '../state/SessionContext'
+import { useConfirm } from '../state/ConfirmContext'
 
 function timeAgo(iso) {
   const diff = Date.now() - new Date(iso).getTime()
@@ -15,6 +16,7 @@ function timeAgo(iso) {
 function SessionRow({ s, active, onSelect, onRename, onToggleFavorite, onDelete }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(s.title)
+  const confirm = useConfirm()
 
   function commitRename() {
     setEditing(false)
@@ -79,9 +81,15 @@ function SessionRow({ s, active, onSelect, onRename, onToggleFavorite, onDelete 
           </button>
           <button
             title="Delete"
-            onClick={(e) => {
+            onClick={async (e) => {
               e.stopPropagation()
-              if (confirm(`Delete "${s.title}"?`)) onDelete(s.id)
+              const ok = await confirm({
+                title: `Delete "${s.title}"?`,
+                message: 'This session will be permanently removed.',
+                confirmLabel: 'Delete',
+                danger: true,
+              })
+              if (ok) onDelete(s.id)
             }}
             className="text-xs px-1 text-[var(--text-tertiary)] hover:text-[var(--danger)]"
           >

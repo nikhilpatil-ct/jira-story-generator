@@ -12,6 +12,12 @@ class Settings:
     max_refinement_attempts: int = int(os.getenv("MAX_REFINEMENT_ATTEMPTS", "2"))
     validation_pass_score: int = int(os.getenv("VALIDATION_PASS_SCORE", "75"))
 
+    # Draft/validate each extracted requirement concurrently, bounded so we don't blow past API rate limits.
+    max_concurrent_drafts: int = int(os.getenv("MAX_CONCURRENT_DRAFTS", "20"))
+    # Retry transient API failures (timeouts, connection drops, 429s, 5xx) with exponential backoff.
+    max_api_retries: int = int(os.getenv("MAX_API_RETRIES", "3"))
+    api_retry_base_delay: float = float(os.getenv("API_RETRY_BASE_DELAY", "1.0"))
+
     jira_base_url: str | None = (os.getenv("JIRA_BASE_URL") or "").strip() or None
     jira_email: str | None = (os.getenv("JIRA_EMAIL") or "").strip() or None
     jira_api_token: str | None = (os.getenv("JIRA_API_TOKEN") or "").strip() or None

@@ -41,9 +41,19 @@ the original unless the feedback asks for more or less.
 """
 
 
-async def draft(requirement: ExtractedRequirement, context: str) -> JiraItem:
+async def draft(requirement: ExtractedRequirement, context: str, app_context: str = "") -> JiraItem:
     issue_type = requirement.issue_type if requirement.issue_type in DRAFT_OUTPUT_FORMATS else IssueType.STORY
+    app_block = ""
+    if app_context:
+        app_block = (
+            "Known application context — the business flow, use cases, design, and tech stack of the "
+            "application this requirement relates to. Use it to ground terminology, name the right "
+            "components/integrations, and add technically accurate detail. Do NOT invent requirements it "
+            "does not support; it is background knowledge, not a new source of scope:\n"
+            f"{app_context}\n\n"
+        )
     user_content = (
+        f"{app_block}"
         f"Original source context:\n{context}\n\n"
         f"Requirement to turn into a JIRA {issue_type.value}:\n"
         f"Title: {requirement.title}\n"

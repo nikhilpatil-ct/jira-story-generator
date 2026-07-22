@@ -1,0 +1,36 @@
+Vineet
+Good morning, everyone.
+I would like to discuss a new requirement for the Consolidation Pay application. We have received a request for a UI-based Bulk Upload feature that will allow users to upload CSV files containing multiple payment records and process bulk payments in a single operation.
+The expected functionality includes:
+
+A new Bulk Upload option in the Consolidation Pay UI.
+Users should be able to upload a CSV file containing payment details.
+System validation for mandatory fields, file format, and duplicate records.
+Display of upload status and validation errors before submission.
+Successful records should be processed for payment, while invalid records should be highlighted for correction.
+Audit logging should be maintained for all bulk upload activities.
+I will be creating a user story and discussing the detailed requirements with the Product Owner. The team can start reviewing feasibility and identifying any dependencies.
+
+Amol
+I would like to highlight an issue identified in the CorpWeb application.
+During testing, I found a defect where users are receiving a 401 Unauthorized error when invoking the Cancel API from the CorpWeb UI.
+Observations:
+
+The issue is reproducible in the QA environment.
+Users are unable to cancel requests due to the authorization failure.
+Initial investigation indicates that the API call is reaching the service, but authentication/authorization validation is failing.
+The issue impacts the cancellation workflow and requires immediate attention.
+Actions Taken:
+
+Defect has been logged with detailed steps and evidence.
+Error logs and API request/response details have been shared with the development team.
+Further analysis is underway to determine whether the issue is related to token validation, API permissions, or recent configuration changes.
+I will coordinate with the development team and provide an update in the next standup.
+
+Vineet
+Thanks, Amol. Please mark the CorpWeb issue as a high-priority defect since it impacts user functionality. Let's also ensure the Consolidation Pay bulk upload story includes proper validation, error handling, and audit requirements.
+
+
+
+
+

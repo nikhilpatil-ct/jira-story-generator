@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { SessionProvider } from './state/SessionContext'
+import { ToastProvider } from './state/ToastContext'
+import { ConfirmProvider } from './state/ConfirmContext'
 import { useTheme } from './state/useTheme'
 import Sidebar from './components/Sidebar'
 import TopNavbar from './components/TopNavbar'
@@ -28,8 +30,12 @@ function Shell() {
 
 export default function App() {
   return (
-    <SessionProvider>
-      <Shell />
-    </SessionProvider>
+    <ToastProvider>
+      <ConfirmProvider>
+        <SessionProvider>
+          <Shell />
+        </SessionProvider>
+      </ConfirmProvider>
+    </ToastProvider>
   )
 }
