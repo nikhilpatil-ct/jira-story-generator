@@ -6,6 +6,7 @@ from app.models.schemas import ExtractionResult, GeneratedStory, IssueType
 from app.services import (
     app_context,
     clarification_store,
+    confluence_client,
     pii_redactor,
     session_store,
     transcript_cleaner,
@@ -73,6 +74,17 @@ async def generate_stories(
     else:
         log("context", "No known applications detected — drafting without app context")
 
+    # Confluence is optional bonus grounding (a page's body, plus the text of any PDF attached to it),
+    # fetched once per run and reused for every item like the app knowledge base above.
+    confluence_ctx = ""
+    if settings.confluence_configured:
+        log("context", "Fetching Confluence page context...")
+        confluence_ctx = await confluence_client.get_page_context()
+        if confluence_ctx:
+            log("context", f"Loaded Confluence context ({len(confluence_ctx):,} characters, including any attached PDFs)")
+        else:
+            log("context", "Confluence page returned no usable context")
+
     session_store.update_step(session_id, "drafting")
     total = len(requirements)
     log("drafting", f"Drafting {total} item(s) in parallel (up to {settings.max_concurrent_drafts} at a time)...")
@@ -94,6 +106,8 @@ async def generate_stories(
         req_text = f"{requirement.title}\n{requirement.raw_description}\n{requirement.rationale}"
         req_apps = app_context.detect_apps(req_text, catalog) or transcript_apps
         app_ctx = app_context.build_context(req_apps)
+        if confluence_ctx:
+            app_ctx = "\n\n---\n\n".join(filter(None, [app_ctx, confluence_ctx]))
         grounding = f" (context: {', '.join(a['name'] for a in req_apps)})" if req_apps else ""
 
         # Anti-hallucination gate: before writing anything, ask whether this item is missing facts we'd

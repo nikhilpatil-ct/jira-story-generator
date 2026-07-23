@@ -12,9 +12,17 @@ from pydantic import BaseModel
 from app.agents import drafter, orchestrator, story_actions, summarizer, validator
 from app.config import settings
 from app.formatting import format_jira_results_reply, format_stories_reply, summarize_stories
-from app.models.schemas import GeneratedStory, IssueType, JiraBug, JiraEpic, OrchestratorAction
+from app.models.schemas import (
+    GeneratedStory,
+    IssueType,
+    JiraBug,
+    JiraEpic,
+    JiraItem,
+    OrchestratorAction,
+    ValidationResult,
+)
 from app.pipeline import generate_stories
-from app.services import app_context, clarification_store, db, file_parser, jira_client, session_store
+from app.services import app_context, clarification_store, confluence_client, db, file_parser, jira_client, session_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -113,6 +121,99 @@ def _find_created_epic_key(state: session_store.SessionState) -> str | None:
     return None
 
 
+def _remember_epic(state: session_store.SessionState, epic: JiraEpic, result: dict) -> None:
+    """Record an epic (reused or newly created) as a normal item in this session, so later lookups via
+    `_find_created_epic_key` pick it up without re-searching JIRA or creating a duplicate."""
+    gs = GeneratedStory(story=epic, validation=ValidationResult(is_valid=True, score=100, issues=[]), attempts=1)
+    state.stories.append(gs)
+    state.jira_results.append({"id": gs.id, "summary": epic.summary, **result})
+
+
+async def _resolve_epic_key(state: session_store.SessionState, story: JiraItem) -> str | None:
+    """Every Story/Bug/Task created in JIRA must land under an Epic. Reuse one already created this
+    session; else reuse a similar Epic already in the JIRA project; else create a new minimal Epic.
+    Mutates `state` when it reuses-from-JIRA or creates an Epic, so later calls in the same session
+    reuse that decision instead of repeating it."""
+    epic_key = _find_created_epic_key(state)
+    if epic_key or not settings.jira_configured:
+        return epic_key
+
+    match = await jira_client.find_matching_epic(story.summary)
+    if match:
+        _log(state, "jira", f"Reusing existing epic {match['key']} (\"{match['summary']}\") for \"{story.summary}\"")
+        placeholder = JiraEpic(
+            summary=match["summary"],
+            description="Existing JIRA epic, matched and reused for this session.",
+            priority=story.priority,
+            business_value="N/A (pre-existing epic).",
+            goal="N/A (pre-existing epic).",
+            success_criteria=["N/A (pre-existing epic)."],
+        )
+        url = f"{settings.jira_base_url.rstrip('/')}/browse/{match['key']}"
+        _remember_epic(state, placeholder, {"key": match["key"], "url": url})
+        return match["key"]
+
+    _log(state, "jira", f"No matching epic found — creating a new epic for \"{story.summary}\"")
+    epic = JiraEpic(
+        summary=story.summary[:100],
+        description=f"Auto-created to group \"{story.summary}\" and related work.",
+        priority=story.priority,
+        labels=story.labels,
+        business_value="Groups related stories generated from the same requirement so they are trackable as one initiative.",
+        goal=f"Deliver: {story.summary}",
+        success_criteria=["All linked stories are completed and accepted."],
+    )
+    result = await jira_client.create_issue(epic)
+    _remember_epic(state, epic, result)
+    _log(state, "jira", f"Created epic {result['key']} for \"{story.summary}\"")
+    return result["key"]
+
+
+async def _preview_epic_key(state: session_store.SessionState, story: JiraItem) -> str | None:
+    """Read-only counterpart to `_resolve_epic_key` for the JIRA preview endpoint: looks up a reusable
+    epic (session-local or an existing JIRA match) but never creates one or mutates `state`, since a
+    preview must not have side effects."""
+    epic_key = _find_created_epic_key(state)
+    if epic_key or not settings.jira_configured:
+        return epic_key
+    match = await jira_client.find_matching_epic(story.summary)
+    return match["key"] if match else None
+
+
+async def _confluence_reference(state: session_store.SessionState) -> tuple[dict | None, list[dict]]:
+    """Fetch the configured Confluence reference page's metadata and any attached PDFs once, so a batch
+    of several new issues doesn't refetch/redownload the same page and files once per issue."""
+    if not settings.confluence_configured:
+        return None, []
+    meta = await confluence_client.get_page_meta()
+    pdfs = await confluence_client.get_pdf_attachments_with_content()
+    return meta, pdfs
+
+
+async def _attach_confluence_reference(
+    state: session_store.SessionState, issue_key: str, meta: dict | None, pdfs: list[dict]
+) -> None:
+    """Best-effort: link a newly created JIRA issue back to the Confluence reference page, and attach any
+    PDF found on that page. Only called on first creation (never on update/retry) so re-saving an issue
+    doesn't pile up duplicate attachments. Never raises -- a failed link/attach must not fail the issue
+    creation that already succeeded."""
+    if meta:
+        try:
+            await jira_client.add_remote_link(
+                issue_key, meta["url"], f"Reference: {meta['title']}", global_id=f"confluence-page-{meta['page_id']}"
+            )
+            _log(state, "jira", f"Linked {issue_key} to Confluence page \"{meta['title']}\"")
+        except jira_client.JiraError as exc:
+            _log(state, "jira", f"Could not link {issue_key} to Confluence page: {exc}")
+
+    for att in pdfs:
+        try:
+            await jira_client.attach_file(issue_key, att["filename"], att["content"])
+            _log(state, "jira", f"Attached \"{att['filename']}\" from Confluence to {issue_key}")
+        except jira_client.JiraError as exc:
+            _log(state, "jira", f"Could not attach \"{att['filename']}\" to {issue_key}: {exc}")
+
+
 async def _create_in_jira(
     state: session_store.SessionState, items: list[GeneratedStory], log_prefix: str = "jira"
 ) -> list[dict]:
@@ -120,19 +221,29 @@ async def _create_in_jira(
     then linked as a child of that (or an already-created) Epic, so a generation run lands in JIRA as a
     connected Epic + Stories/Bugs hierarchy instead of flat, unrelated issues."""
     ordered = sorted(items, key=lambda gs: 0 if isinstance(gs.story, JiraEpic) else 1)
-    epic_key = _find_created_epic_key(state)
+    # If this batch includes its own Epic, that one wins (created first below, then linked to). Only
+    # when it doesn't do we need to resolve one up front, so every Story/Bug in the batch still lands
+    # under an Epic instead of being created flat.
+    has_epic_in_batch = any(isinstance(gs.story, JiraEpic) for gs in ordered)
+    epic_key = None
+    if not has_epic_in_batch:
+        first_non_epic = next((gs for gs in ordered if not isinstance(gs.story, JiraEpic)), None)
+        if first_non_epic is not None:
+            epic_key = await _resolve_epic_key(state, first_non_epic.story)
+    confluence_meta, confluence_pdfs = await _confluence_reference(state)
     results: list[dict] = []
     for gs in ordered:
         story = gs.story
         try:
             if isinstance(story, JiraEpic):
-                result = await jira_client.create_issue(story, test_cases=gs.test_cases)
+                result = await jira_client.create_issue(story)
                 epic_key = result["key"]
                 _log(state, log_prefix, f"Created epic {result['key']} for \"{story.summary}\"")
             else:
-                result = await jira_client.create_issue(story, epic_key=epic_key, test_cases=gs.test_cases)
+                result = await jira_client.create_issue(story, epic_key=epic_key)
                 note = f" (linked to epic {epic_key})" if epic_key else ""
                 _log(state, log_prefix, f"Created {result['key']} for \"{story.summary}\"{note}")
+            await _attach_confluence_reference(state, result["key"], confluence_meta, confluence_pdfs)
             results.append({"id": gs.id, "summary": story.summary, **result})
         except jira_client.JiraError as exc:
             _log(state, log_prefix, f"FAILED to create \"{story.summary}\": {exc}")
@@ -463,8 +574,8 @@ async def jira_preview(session_id: str, index: int) -> dict:
         raise HTTPException(status_code=400, detail="JIRA is not configured")
     gs = state.stories[index]
     story = gs.story
-    epic_key = None if isinstance(story, JiraEpic) else _find_created_epic_key(state)
-    return jira_client.build_fields(story, epic_key=epic_key, test_cases=gs.test_cases)
+    epic_key = None if isinstance(story, JiraEpic) else await _preview_epic_key(state, story)
+    return jira_client.build_fields(story, epic_key=epic_key)
 
 
 @app.post("/api/jira/retry")
@@ -483,16 +594,18 @@ async def jira_retry(req: JiraRetryRequest) -> dict:
     try:
         if existing:
             _log(state, "jira", f"Updating {existing['key']} with latest changes: \"{story.summary}\"")
-            result = await jira_client.update_issue(existing["key"], story, test_cases=gs.test_cases)
+            result = await jira_client.update_issue(existing["key"], story)
             entry = {"id": gs.id, "summary": story.summary, **result}
             _log(state, "jira", f"Updated {result['key']} for \"{story.summary}\"")
         else:
-            epic_key = None if isinstance(story, JiraEpic) else _find_created_epic_key(state)
+            epic_key = None if isinstance(story, JiraEpic) else await _resolve_epic_key(state, story)
             link_note = f" (linking to epic {epic_key})" if epic_key else ""
             _log(state, "jira", f"Creating {story.issue_type.value} in JIRA: \"{story.summary}\"{link_note}")
-            result = await jira_client.create_issue(story, epic_key=epic_key, test_cases=gs.test_cases)
+            result = await jira_client.create_issue(story, epic_key=epic_key)
             entry = {"id": gs.id, "summary": story.summary, **result}
             _log(state, "jira", f"Created {result['key']} for \"{story.summary}\"")
+            confluence_meta, confluence_pdfs = await _confluence_reference(state)
+            await _attach_confluence_reference(state, result["key"], confluence_meta, confluence_pdfs)
     except jira_client.JiraError as exc:
         verb = "update" if existing else "create"
         entry = {"id": gs.id, "summary": story.summary, "error": str(exc)}

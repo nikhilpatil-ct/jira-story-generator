@@ -43,5 +43,14 @@ class Settings:
     def jira_configured(self) -> bool:
         return all([self.jira_base_url, self.jira_email, self.jira_api_token, self.jira_project_key])
 
+    # Confluence Cloud — same Atlassian account as JIRA above, so it reuses jira_email/jira_api_token
+    # rather than needing its own credentials.
+    confluence_base_url: str | None = (os.getenv("CONFLUENCE_BASE_URL") or "").strip() or None
+    confluence_page_id: str | None = (os.getenv("CONFLUENCE_PAGE_ID") or "").strip() or None
+
+    @property
+    def confluence_configured(self) -> bool:
+        return all([self.confluence_base_url, self.confluence_page_id, self.jira_email, self.jira_api_token])
+
 
 settings = Settings()

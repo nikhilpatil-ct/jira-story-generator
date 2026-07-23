@@ -1,9 +1,10 @@
 import logging
+from difflib import SequenceMatcher
 
 import httpx
 
 from app.config import settings
-from app.models.schemas import JiraBug, JiraEpic, JiraItem, JiraUserStory, TestCase
+from app.models.schemas import JiraBug, JiraEpic, JiraItem, JiraUserStory
 
 logger = logging.getLogger("jira_client")
 
@@ -32,19 +33,7 @@ def _bullet_list(items: list[str]) -> dict:
     }
 
 
-def _test_cases_section(test_cases: list[TestCase]) -> list[dict]:
-    if not test_cases:
-        return []
-    content = [_heading("Test Cases")]
-    for i, tc in enumerate(test_cases, start=1):
-        content.append(_text_block(f"{i}. {tc.title}"))
-        if tc.steps:
-            content.append(_bullet_list(tc.steps))
-        content.append(_text_block(f"Expected: {tc.expected_result}"))
-    return content
-
-
-def _build_adf_description(story: JiraItem, test_cases: list[TestCase] | None = None) -> dict:
+def _build_adf_description(story: JiraItem) -> dict:
     content: list[dict] = []
 
     if isinstance(story, JiraEpic):
@@ -74,8 +63,6 @@ def _build_adf_description(story: JiraItem, test_cases: list[TestCase] | None = 
         if story.acceptance_criteria:
             content += [_heading("Acceptance Criteria"), _bullet_list(story.acceptance_criteria)]
 
-    content += _test_cases_section(test_cases or [])
-
     if not content:
         content = [_text_block(story.description or story.summary)]
 
@@ -91,17 +78,16 @@ def _epic_link_fields(epic_key: str) -> dict:
     return {"parent": {"key": epic_key}}
 
 
-def build_fields(story: JiraItem, epic_key: str | None = None, test_cases: list[TestCase] | None = None) -> dict:
+def build_fields(story: JiraItem, epic_key: str | None = None) -> dict:
     """Build the JIRA issue `fields` payload for a story. Shared by preview and create.
 
     `epic_key`, when given, attaches this (non-Epic) issue to that Epic as its parent/child.
-    `test_cases`, when given, are rendered into the description under a "Test Cases" heading.
     """
     fields: dict = {
         "project": {"key": settings.jira_project_key},
         "summary": story.summary[:255],
         "issuetype": {"name": story.issue_type.value},
-        "description": _build_adf_description(story, test_cases=test_cases),
+        "description": _build_adf_description(story),
     }
     if story.labels:
         fields["labels"] = story.labels
@@ -114,9 +100,7 @@ def build_fields(story: JiraItem, epic_key: str | None = None, test_cases: list[
     return fields
 
 
-async def create_issue(
-    story: JiraItem, epic_key: str | None = None, test_cases: list[TestCase] | None = None
-) -> dict:
+async def create_issue(story: JiraItem, epic_key: str | None = None) -> dict:
     """Create a single issue in JIRA via the Cloud REST API v3. Raises JiraError on failure.
 
     Pass `epic_key` to link a newly created Story/Bug/Task under that Epic; ignored for Epics themselves.
@@ -126,7 +110,7 @@ async def create_issue(
             "JIRA is not configured. Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and JIRA_PROJECT_KEY."
         )
 
-    fields = build_fields(story, epic_key=epic_key, test_cases=test_cases)
+    fields = build_fields(story, epic_key=epic_key)
     url = f"{settings.jira_base_url.rstrip('/')}/rest/api/3/issue"
 
     logger.info("Creating JIRA %s in project %s: %r", story.issue_type.value, settings.jira_project_key, story.summary)
@@ -157,26 +141,22 @@ async def create_issue(
     raise JiraError(last_error or "Unknown JIRA error")
 
 
-def build_update_fields(
-    story: JiraItem, epic_key: str | None = None, test_cases: list[TestCase] | None = None
-) -> dict:
+def build_update_fields(story: JiraItem, epic_key: str | None = None) -> dict:
     """Fields payload for updating an existing issue: project/issuetype are immutable in practice, so drop them."""
-    fields = build_fields(story, epic_key=epic_key, test_cases=test_cases)
+    fields = build_fields(story, epic_key=epic_key)
     fields.pop("project", None)
     fields.pop("issuetype", None)
     return fields
 
 
-async def update_issue(
-    key: str, story: JiraItem, epic_key: str | None = None, test_cases: list[TestCase] | None = None
-) -> dict:
+async def update_issue(key: str, story: JiraItem, epic_key: str | None = None) -> dict:
     """Update an existing JIRA issue in place via PUT. Raises JiraError on failure."""
     if not settings.jira_configured:
         raise JiraError(
             "JIRA is not configured. Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and JIRA_PROJECT_KEY."
         )
 
-    fields = build_update_fields(story, epic_key=epic_key, test_cases=test_cases)
+    fields = build_update_fields(story, epic_key=epic_key)
     url = f"{settings.jira_base_url.rstrip('/')}/rest/api/3/issue/{key}"
     issue_url = f"{settings.jira_base_url.rstrip('/')}/browse/{key}"
 
@@ -203,3 +183,105 @@ async def update_issue(
 
     logger.error("Giving up updating %s in JIRA: %s", key, last_error)
     raise JiraError(last_error or "Unknown JIRA error")
+
+
+async def add_remote_link(issue_key: str, url: str, title: str, global_id: str | None = None) -> dict:
+    """Attach a web link (e.g. to a Confluence reference page) to a JIRA issue. Passing `global_id`
+    makes this idempotent — JIRA upserts on that id instead of creating a duplicate link if called again
+    for the same issue."""
+    if not settings.jira_configured:
+        raise JiraError(
+            "JIRA is not configured. Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and JIRA_PROJECT_KEY."
+        )
+
+    api_url = f"{settings.jira_base_url.rstrip('/')}/rest/api/3/issue/{issue_key}/remotelink"
+    payload: dict = {"object": {"url": url, "title": title}}
+    if global_id:
+        payload["globalId"] = global_id
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            api_url,
+            json=payload,
+            auth=(settings.jira_email, settings.jira_api_token),
+            headers={"Content-Type": "application/json"},
+        )
+    if resp.status_code >= 300:
+        raise JiraError(f"JIRA remote link failed {resp.status_code}: {resp.text}")
+    return resp.json()
+
+
+async def attach_file(issue_key: str, filename: str, content: bytes, content_type: str = "application/pdf") -> list[dict]:
+    """Attach a file (e.g. a PDF pulled from a linked Confluence page) to an existing JIRA issue."""
+    if not settings.jira_configured:
+        raise JiraError(
+            "JIRA is not configured. Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and JIRA_PROJECT_KEY."
+        )
+
+    url = f"{settings.jira_base_url.rstrip('/')}/rest/api/3/issue/{issue_key}/attachments"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            url,
+            files={"file": (filename, content, content_type)},
+            auth=(settings.jira_email, settings.jira_api_token),
+            # Required by JIRA's attachment endpoint to bypass its XSRF check for non-browser clients.
+            headers={"X-Atlassian-Token": "no-check"},
+        )
+    if resp.status_code >= 300:
+        raise JiraError(f"JIRA attachment upload failed {resp.status_code}: {resp.text}")
+    return resp.json()
+
+
+async def search_epics(max_results: int = 50) -> list[dict]:
+    """List Epics already in the configured JIRA project (key + summary), newest first. Used to find a
+    reusable Epic before creating a new one, instead of creating a fresh Epic for every batch."""
+    if not settings.jira_configured:
+        raise JiraError(
+            "JIRA is not configured. Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and JIRA_PROJECT_KEY."
+        )
+
+    jql = f'project = "{settings.jira_project_key}" AND issuetype = Epic ORDER BY created DESC'
+    # /rest/api/3/search/jql is the current JQL search endpoint (the older /rest/api/3/search was
+    # deprecated/sunset by Atlassian).
+    url = f"{settings.jira_base_url.rstrip('/')}/rest/api/3/search/jql"
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            url,
+            json={"jql": jql, "maxResults": max_results, "fields": ["summary"]},
+            auth=(settings.jira_email, settings.jira_api_token),
+            headers={"Content-Type": "application/json"},
+        )
+
+    if resp.status_code >= 300:
+        raise JiraError(f"JIRA API error {resp.status_code}: {resp.text}")
+
+    data = resp.json()
+    return [{"key": issue["key"], "summary": issue["fields"]["summary"]} for issue in data.get("issues", [])]
+
+
+def _title_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+
+async def find_matching_epic(candidate_title: str, threshold: float = 0.55) -> dict | None:
+    """Search existing Epics in the project and return the closest match to `candidate_title` by simple
+    summary-text similarity, if any clears `threshold`. Returns None if nothing is close enough — the
+    caller decides whether to create a new Epic in that case."""
+    try:
+        epics = await search_epics()
+    except JiraError as exc:
+        logger.warning("Could not search existing epics (%s) — treating as none found", exc)
+        return None
+
+    best: dict | None = None
+    best_score = 0.0
+    for epic in epics:
+        score = _title_similarity(candidate_title, epic["summary"])
+        if score > best_score:
+            best, best_score = epic, score
+
+    if best and best_score >= threshold:
+        logger.info("Matched existing epic %s (%.2f similarity) for %r", best["key"], best_score, candidate_title)
+        return best
+    return None
