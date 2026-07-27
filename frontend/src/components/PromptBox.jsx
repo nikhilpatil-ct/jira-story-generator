@@ -33,7 +33,7 @@ function ChatLoader() {
 }
 
 export default function PromptBox() {
-  const { session, sendMessage, sending, error, currentStep } = useSession()
+  const { session, sendMessage, sending, stopping, stopGeneration, error, currentStep } = useSession()
   const [input, setInput] = useState('')
   const logRef = useRef(null)
 
@@ -133,13 +133,25 @@ export default function PromptBox() {
           placeholder='Ask a question, request a revision ("make item 2 high priority"), or type a command…'
           className="flex-1 resize-none bg-transparent outline-none text-sm px-2 py-1.5 max-h-28"
         />
-        <button
-          type="submit"
-          disabled={sending || !input.trim()}
-          className="px-4 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-strong)] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
-        >
-          Send
-        </button>
+        {sending ? (
+          <button
+            type="button"
+            onClick={stopGeneration}
+            disabled={stopping}
+            title="Stop the current run"
+            className="px-4 py-1.5 rounded-lg bg-[var(--danger)] hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+          >
+            {stopping ? 'Stopping…' : 'Stop'}
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!input.trim()}
+            className="px-4 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-strong)] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+          >
+            Send
+          </button>
+        )}
       </form>
     </div>
   )

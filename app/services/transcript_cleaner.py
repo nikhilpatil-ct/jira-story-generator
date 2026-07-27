@@ -1,5 +1,7 @@
 import re
 
+from app.models.schemas import SourceType
+
 _TIMESTAMP_RE = re.compile(
     r"\[?\(?\b\d{1,2}:\d{2}(?::\d{2})?\b\)?\]?|\[\d{1,2}:\d{2}\s*(?:AM|PM)?\]", re.IGNORECASE
 )
@@ -27,6 +29,12 @@ def looks_like_transcript(text: str) -> bool:
     return signal_lines / len(lines) > 0.15
 
 
+def detect_source_type(text: str) -> SourceType:
+    """Default classification used when the user hasn't explicitly chosen a source type in the UI:
+    spoken meeting transcript vs. a structured document (BRD/PRD/spec)."""
+    return SourceType.TRANSCRIPT if looks_like_transcript(text) else SourceType.DOCUMENT
+
+
 def _dedupe_sentences(text: str) -> str:
     seen: set[str] = set()
     out_lines = []
@@ -40,12 +48,15 @@ def _dedupe_sentences(text: str) -> str:
     return "\n".join(out_lines)
 
 
-def clean(raw_text: str) -> str:
+def clean(raw_text: str, source_type: SourceType) -> str:
     """Deterministic, non-LLM preprocessing. Spoken transcripts get full ASR/filler cleanup;
     structured documents (BRDs, specs) only get whitespace/blank-line normalization, since they
-    have no timestamps/filler speech to strip and the speech-cleanup regexes could clip prose."""
+    have no timestamps/filler speech to strip and the speech-cleanup regexes could clip prose.
+
+    The caller decides `source_type` (user's toggle or `detect_source_type`) so the transcript-vs-
+    document decision is made once, up front, rather than re-inferred here."""
     text = raw_text.replace("\r\n", "\n")
-    if looks_like_transcript(text):
+    if source_type == SourceType.TRANSCRIPT:
         text = _TIMESTAMP_RE.sub("", text)
         text = _LAUGH_NOISE_RE.sub("", text)
         text = _SPEAKER_LABEL_RE.sub(lambda m: f"{m.group(1).strip()}: ", text)

@@ -1,8 +1,8 @@
 import asyncio
 
-from app.agents import clarifier, drafter, extractor, story_actions, validator
+from app.agents import clarifier, drafter, extractor, story_actions, titler, validator
 from app.config import settings
-from app.models.schemas import ExtractionResult, GeneratedStory, IssueType
+from app.models.schemas import ExtractionResult, GeneratedStory, IssueType, SourceType
 from app.services import (
     app_context,
     clarification_store,
@@ -15,18 +15,28 @@ from app.services import (
 
 
 async def generate_stories(
-    session_id: str, conversation_text: str, generation_scope: list[IssueType] | None = None
+    session_id: str,
+    conversation_text: str,
+    generation_scope: list[IssueType] | None = None,
+    source_type: SourceType | None = None,
 ) -> tuple[list[GeneratedStory], ExtractionResult, str]:
-    """Run the clean -> extract -> draft -> validate -> refine pipeline over raw conversation text."""
+    """Run the clean -> extract -> draft -> validate -> refine pipeline over raw conversation text.
+
+    `source_type` selects the transcript-vs-document path (cleaning strategy + extraction prompt). It
+    comes from the user's UI toggle; when None (the "Auto" toggle), it's auto-detected from the text."""
 
     def log(stage: str, message: str) -> None:
         session_store.append_log(session_id, stage, message)
 
     session_store.update_step(session_id, "cleaning")
-    is_transcript = transcript_cleaner.looks_like_transcript(conversation_text)
-    kind = "meeting transcript" if is_transcript else "structured document (e.g. BRD/PRD)"
-    log("cleaning", f"Detected {kind} ({len(conversation_text):,} characters) — cleaning...")
-    cleaned = transcript_cleaner.clean(conversation_text)
+    if source_type is None:
+        source_type = transcript_cleaner.detect_source_type(conversation_text)
+        origin = "auto-detected"
+    else:
+        origin = "selected"
+    kind = "meeting transcript" if source_type == SourceType.TRANSCRIPT else "structured document (e.g. BRD/PRD)"
+    log("cleaning", f"Source {origin}: {kind} ({len(conversation_text):,} characters) — cleaning...")
+    cleaned = transcript_cleaner.clean(conversation_text, source_type)
     log("cleaning", f"Cleaned input: {len(conversation_text):,} -> {len(cleaned):,} characters")
 
     # Redact PII BEFORE any LLM call (translation/extraction) so raw personal data never leaves the
@@ -42,11 +52,11 @@ async def generate_stories(
     detected_lang = translator.detect_language(cleaned)
     log("cleaning", f"Detected language: {detected_lang or 'unknown'} — normalizing to English...")
     cleaned = await translator.translate_to_english(cleaned)
-    log("cleaning", "Transcript normalized to English")
+    log("cleaning", "Input normalized to English")
 
     session_store.update_step(session_id, "extracting")
     log("extracting", "Extracting requirements, risks, and action items...")
-    extraction = await extractor.extract(cleaned)
+    extraction = await extractor.extract(cleaned, source_type)
 
     requirements = extraction.requirements
     counts = {t: sum(1 for r in requirements if r.issue_type == t) for t in set(r.issue_type for r in requirements)}
@@ -56,6 +66,20 @@ async def generate_stories(
         log("extracting", f"Identified {len(extraction.risks)} risk(s)")
     if extraction.action_items:
         log("extracting", f"Identified {len(extraction.action_items)} action item(s)")
+
+    # Give a still-unnamed session a concise title now — while drafting (the slow part) is still ahead,
+    # so it shows up meaningfully in the sidebar instead of "New session" for the whole run. Titling
+    # runs on `cleaned`, which is already PII-redacted, so no raw personal data is sent for naming. It's
+    # cosmetic: only spend the (cheap-model) call when the title is still a default, and never let a
+    # failure here block generation.
+    current = session_store.get(session_id)
+    if current is not None and current.title in session_store.DEFAULT_TITLES:
+        try:
+            proposed = await titler.generate_title(cleaned)
+            if proposed and session_store.autoname_if_default(session_id, proposed):
+                log("pipeline", f'Named session: "{proposed}"')
+        except Exception as exc:  # noqa: BLE001 - naming must never block generation
+            log("pipeline", f"Could not auto-name session ({exc}) — keeping current title")
 
     if generation_scope:
         requirements = [r for r in requirements if r.issue_type in generation_scope]

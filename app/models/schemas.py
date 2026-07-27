@@ -20,6 +20,15 @@ class IssueType(str, Enum):
     BUG = "Bug"
 
 
+class SourceType(str, Enum):
+    """How the raw input should be preprocessed and extracted. `transcript` = spoken meeting dialogue
+    (gets ASR/filler cleanup, boundaries inferred); `document` = an already-structured requirements
+    doc such as a BRD/PRD (whitespace-only cleanup, itemization preserved)."""
+
+    TRANSCRIPT = "transcript"
+    DOCUMENT = "document"
+
+
 class Severity(str, Enum):
     CRITICAL = "Critical"
     MAJOR = "Major"

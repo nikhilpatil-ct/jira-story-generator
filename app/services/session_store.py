@@ -34,6 +34,10 @@ def now_iso() -> str:
 
 _now = now_iso
 
+# Titles assigned automatically at creation. Auto-naming only replaces one of these, so a title the
+# user has typed themselves (rename) is never overwritten.
+DEFAULT_TITLES = {"New session", "Untitled session"}
+
 
 def _row_to_state(row: dict) -> SessionState:
     return SessionState(
@@ -172,6 +176,23 @@ def rename(session_id: str, title: str) -> None:
         conn.execute(
             "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?", (title, _now(), session_id)
         )
+
+
+def autoname_if_default(session_id: str, title: str) -> bool:
+    """Rename the session to `title` only if it still carries an auto-assigned default title, so a
+    user's own rename is never clobbered. Re-checks under the connection to avoid racing a manual
+    rename. Returns True if it renamed."""
+    title = (title or "").strip()
+    if not title:
+        return False
+    with db.get_conn() as conn:
+        row = conn.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if row is None or row["title"] not in DEFAULT_TITLES:
+            return False
+        conn.execute(
+            "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?", (title, _now(), session_id)
+        )
+    return True
 
 
 def set_favorite(session_id: str, favorite: bool) -> None:

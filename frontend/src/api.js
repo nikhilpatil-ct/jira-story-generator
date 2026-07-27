@@ -34,12 +34,20 @@ export const api = {
     return fetch('/api/upload', { method: 'POST', body: form }).then(handle)
   },
 
-  chat: (sessionId, message, autoCreateJira = false) =>
+  chat: (sessionId, message, autoCreateJira = false, sourceType = null) =>
     fetch('/api/chat', {
       method: 'POST',
       headers: JSON_HEADERS,
-      body: JSON.stringify({ session_id: sessionId, message, auto_create_jira: autoCreateJira }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        message,
+        auto_create_jira: autoCreateJira,
+        source_type: sourceType,
+      }),
     }).then(handle),
+
+  stopGeneration: (sessionId) =>
+    fetch(`/api/generation/${sessionId}/stop`, { method: 'POST' }).then(handle),
 
   storyAction: (sessionId, index, action, instructions) =>
     fetch(`/api/stories/${sessionId}/${index}/action`, {

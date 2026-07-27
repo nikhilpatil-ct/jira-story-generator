@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import logging
@@ -19,10 +20,20 @@ from app.models.schemas import (
     JiraEpic,
     JiraItem,
     OrchestratorAction,
+    SourceType,
     ValidationResult,
 )
 from app.pipeline import generate_stories
-from app.services import app_context, clarification_store, confluence_client, db, file_parser, jira_client, session_store
+from app.services import (
+    app_context,
+    cancellation,
+    clarification_store,
+    confluence_client,
+    db,
+    file_parser,
+    jira_client,
+    session_store,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -50,6 +61,8 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     message: str
     auto_create_jira: bool = False
+    # "transcript" | "document" from the editor's source toggle; None = "Auto" (server auto-detects).
+    source_type: SourceType | None = None
 
 
 class ChatResponse(BaseModel):
@@ -252,18 +265,25 @@ async def _create_in_jira(
 
 
 async def _run_generation(
-    state: session_store.SessionState, generation_scope: list[IssueType] | None, auto_create_jira: bool
+    state: session_store.SessionState,
+    generation_scope: list[IssueType] | None,
+    auto_create_jira: bool,
+    source_type: SourceType | None = None,
 ) -> str:
     conversation_text = "\n\n".join(state.raw_text_parts)
     scope_txt = f" (scope: {', '.join(t.value for t in generation_scope)})" if generation_scope else ""
     session_store.append_log(state.id, "pipeline", f"Starting generation{scope_txt}")
 
-    generated, extraction, cleaned = await generate_stories(state.id, conversation_text, generation_scope)
+    generated, extraction, cleaned = await generate_stories(
+        state.id, conversation_text, generation_scope, source_type
+    )
 
     # pipeline.generate_stories writes fine-grained log entries directly to the DB as it runs (so a
-    # concurrent poller can see them mid-run); pick those up now before appending more in-memory, so
-    # the eventual session_store.save(state) below doesn't clobber them.
-    state.logs = session_store.get(state.id).logs
+    # concurrent poller can see them mid-run), and may auto-name a still-"New session" session; pick
+    # both up now so the eventual session_store.save(state) below doesn't clobber them back.
+    persisted = session_store.get(state.id)
+    state.logs = persisted.logs
+    state.title = persisted.title
 
     if generation_scope:
         kept = [gs for gs in state.stories if gs.story.issue_type not in generation_scope]
@@ -314,6 +334,43 @@ async def _run_generation(
         state.stories, state.risks, state.open_questions, state.action_items
     )
     return format_stories_reply(state.stories, state.open_questions) + held_note
+
+
+async def _run_generation_cancellable(
+    state: session_store.SessionState,
+    generation_scope: list[IssueType] | None,
+    auto_create_jira: bool,
+    source_type: SourceType | None = None,
+) -> str:
+    """Run a generation as a cancellable task so ``POST /api/generation/{id}/stop`` (the Stop button) can
+    interrupt it. On a user stop, returns a short 'stopped' reply and leaves the session where it was so
+    the user can just press Generate Items again. Any other cancellation (e.g. a client disconnect) is
+    re-raised so it isn't silently swallowed."""
+    task = asyncio.create_task(_run_generation(state, generation_scope, auto_create_jira, source_type))
+    cancellation.register(state.id, task)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if not cancellation.was_requested(state.id):
+            task.cancel()  # cancellation came from elsewhere — make sure the run really stops, then propagate
+            raise
+        session_store.append_log(state.id, "pipeline", "Generation stopped by user")
+        # Pull back everything the (now-stopped) run wrote to the DB directly — logs, any mid-run
+        # auto-name — so the caller's save(state) preserves it instead of clobbering it.
+        persisted = session_store.get(state.id)
+        if persisted is not None:
+            state.logs = persisted.logs
+            state.title = persisted.title
+        session_store.update_step(state.id, "idle")
+        state.current_step = "idle"
+        return (
+            "⏹️ Generation stopped. Your transcript is still here — edit it or press Generate Items to run again."
+        )
+    finally:
+        cancellation.unregister(state.id)
+        # Belt-and-suspenders: drop any question groups still pending if the stop landed outside the
+        # pipeline's own cleanup (its finally already clears them on a normal run).
+        clarification_store.clear_session(state.id)
 
 
 @app.get("/health")
@@ -402,7 +459,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         if state.stage == "gathering":
             state.raw_text_parts.append(req.message)
             if decision.action == OrchestratorAction.READY_TO_GENERATE:
-                reply = await _run_generation(state, decision.generation_scope, req.auto_create_jira)
+                reply = await _run_generation_cancellable(
+                    state, decision.generation_scope, req.auto_create_jira, req.source_type
+                )
 
         elif state.stage == "reviewing":
             if decision.action == OrchestratorAction.CONFIRM_CREATE:
@@ -437,7 +496,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
                     )
 
             elif decision.action == OrchestratorAction.REGENERATE:
-                reply = await _run_generation(state, decision.generation_scope, req.auto_create_jira)
+                reply = await _run_generation_cancellable(
+                    state, decision.generation_scope, req.auto_create_jira, req.source_type
+                )
 
         state.history.append({"role": "assistant", "content": reply})
         session_store.save(state)
@@ -452,6 +513,15 @@ async def chat(req: ChatRequest) -> ChatResponse:
     except Exception as exc:  # noqa: BLE001 - surface a clean error to the chat client
         session_store.save(state)
         raise HTTPException(status_code=502, detail=f"Story generator error: {exc}") from exc
+
+
+@app.post("/api/generation/{session_id}/stop")
+async def stop_generation(session_id: str) -> dict:
+    """Stop an in-flight generation run for this session (the Stop button). No-op if nothing is running."""
+    stopping = cancellation.request_stop(session_id)
+    if stopping:
+        session_store.append_log(session_id, "pipeline", "Stop requested — cancelling generation…")
+    return {"status": "stopping" if stopping else "idle"}
 
 
 @app.post("/api/clarify/{session_id}")

@@ -19,13 +19,24 @@ export function SessionProvider({ children }) {
   const [activeSessionId, setActiveSessionId] = useState(null)
   const [session, setSession] = useState(null)
   const [config, setConfig] = useState({ jira_configured: false, jira_project_key: null, model: null })
-  const [sending, setSending] = useState(false)
+  // The id of the session a generation run is currently in flight for (null when nothing is running).
+  // Scoping this to a session — instead of a bare `sending` boolean — is what keeps a run from appearing
+  // in a different session the user switches to while it's still going.
+  const [runningSessionId, setRunningSessionId] = useState(null)
+  const [stopping, setStopping] = useState(false)
   const [currentStep, setCurrentStep] = useState('idle')
   const [error, setError] = useState(null)
   const [autoCreateJira, setAutoCreateJiraState] = useState(
     () => localStorage.getItem('auto_create_jira') === 'true'
   )
   const pollRef = useRef(null)
+  // Latest active session id, readable synchronously from the polling/async callbacks (which would
+  // otherwise close over a stale `activeSessionId`).
+  const activeSessionIdRef = useRef(null)
+
+  // The run is only "sending" from the perspective of the session it actually belongs to; any other
+  // session the user is viewing sees a normal, idle UI.
+  const sending = runningSessionId !== null && runningSessionId === activeSessionId
 
   const setAutoCreateJira = useCallback((value) => {
     setAutoCreateJiraState(value)
@@ -47,6 +58,9 @@ export function SessionProvider({ children }) {
 
   const selectSession = useCallback(
     async (id) => {
+      // Update the ref synchronously so the running session's poller stops driving the on-screen
+      // session the moment we switch away, even before React commits the state change below.
+      activeSessionIdRef.current = id
       setActiveSessionId(id)
       localStorage.setItem('active_session_id', id)
       await loadSession(id)
@@ -92,8 +106,17 @@ export function SessionProvider({ children }) {
       pollRef.current = setInterval(async () => {
         try {
           const full = await api.getSession(id)
-          setCurrentStep(full.current_step || 'idle')
-          setSession(full)
+          // Only drive the displayed session/step when the run's session is the one on screen — otherwise
+          // a background run would clobber whatever session the user has since switched to.
+          if (activeSessionIdRef.current === id) {
+            setCurrentStep(full.current_step || 'idle')
+            setSession(full)
+          }
+          // Reflect a mid-run auto-rename (and freshness) in the sidebar list regardless of what's on
+          // screen, without a full refetch.
+          setSessions((prev) =>
+            prev.map((s) => (s.id === id ? { ...s, title: full.title, updated_at: full.updated_at } : s))
+          )
         } catch {
           // ignore transient poll errors
         }
@@ -105,14 +128,27 @@ export function SessionProvider({ children }) {
   useEffect(() => stopPolling, [stopPolling])
 
   const sendMessage = useCallback(
-    async (text) => {
-      if (!activeSessionId || !text.trim() || sending) return null
-      setSending(true)
+    async (text, sourceType = null) => {
+      if (!activeSessionId || !text.trim()) return null
+      // One run at a time: the single poller can only track one in-flight run. If another is going
+      // (even in a different session), ask the user to wait rather than corrupting it.
+      if (runningSessionId) {
+        if (runningSessionId !== activeSessionId) {
+          setError('A generation is still running in another session — wait for it to finish or stop it first.')
+        }
+        return null
+      }
+      const runId = activeSessionId
+      setRunningSessionId(runId)
       setError(null)
-      startPolling(activeSessionId)
+      startPolling(runId)
       try {
-        const result = await api.chat(activeSessionId, text, autoCreateJira)
-        const full = await loadSession(activeSessionId)
+        const result = await api.chat(runId, text, autoCreateJira, sourceType)
+        const full = await api.getSession(runId)
+        // Only push the finished run's result onto the screen if the user is still viewing that session.
+        if (activeSessionIdRef.current === runId) {
+          setSession(full)
+        }
         await refreshSessions()
         return { result, full }
       } catch (err) {
@@ -120,12 +156,27 @@ export function SessionProvider({ children }) {
         throw err
       } finally {
         stopPolling()
-        setCurrentStep('idle')
-        setSending(false)
+        setRunningSessionId(null)
+        setStopping(false)
+        if (activeSessionIdRef.current === runId) setCurrentStep('idle')
       }
     },
-    [activeSessionId, sending, autoCreateJira, startPolling, stopPolling, loadSession, refreshSessions]
+    [activeSessionId, runningSessionId, autoCreateJira, startPolling, stopPolling, refreshSessions]
   )
+
+  // Ask the server to cancel the in-flight generation run. The still-open /api/chat request then
+  // returns its "stopped" reply on its own, which flips `sending` back off via sendMessage's finally.
+  const stopGeneration = useCallback(async () => {
+    // Only stoppable from the session the run actually belongs to (which is the only place the Stop
+    // button is shown anyway).
+    if (!activeSessionId || runningSessionId !== activeSessionId) return
+    setStopping(true)
+    try {
+      await api.stopGeneration(activeSessionId)
+    } catch {
+      // The run may have finished between render and click — nothing to stop, ignore.
+    }
+  }, [activeSessionId, runningSessionId])
 
   const submitClarification = useCallback(
     async (groupId, answers, skip = false) => {
@@ -191,6 +242,8 @@ export function SessionProvider({ children }) {
     session,
     config,
     sending,
+    stopping,
+    stopGeneration,
     currentStep,
     currentStepLabel: STEP_LABELS[currentStep] || currentStep,
     autoCreateJira,
